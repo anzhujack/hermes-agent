@@ -1,0 +1,149 @@
+"""Tests for the unified Lchd personal assistant plugin."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+import types
+from pathlib import Path
+
+import pytest
+import yaml
+
+
+@pytest.fixture(autouse=True)
+def _isolated_lchd_home(tmp_path, monkeypatch):
+    hermes_home = tmp_path / ".hermes"
+    vault = tmp_path / "vault"
+    profiles = hermes_home / "lchd-profiles"
+    wiki = hermes_home / "wiki"
+    hermes_home.mkdir()
+    vault.mkdir()
+    (vault / "Home.md").write_text("# Home\n", encoding="utf-8")
+    (vault / "Hermes").mkdir()
+    (vault / "Hermes" / "Hermes个性化助手.md").write_text("# Personal\n", encoding="utf-8")
+    for role in ["coordinator", "researcher", "writer", "builder"]:
+        d = profiles / role
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SOUL.md").write_text(f"# {role}\n", encoding="utf-8")
+    wiki.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("LCHD_OBSIDIAN_VAULT", str(vault))
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "model": {"provider": "openai-codex", "default": "gpt-5.5", "api_key": "SECRET"},
+                "plugins": {"enabled": ["lchd-personal-assistant"]},
+                "lchd_personal": {
+                    "wiki_root": str(wiki),
+                    "obsidian_vault_path": str(vault),
+                    "profiles_dir": str(profiles),
+                    "mode": "dual_engine_knowledge_base_with_specialist_profiles",
+                },
+                "fallback_providers": [{"provider": "custom:CLIProxyAPI", "model": "glm-5.2"}],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    return hermes_home
+
+
+def _load_package():
+    repo_root = Path(__file__).resolve().parents[2]
+    plugin_dir = repo_root / "plugins" / "lchd_personal_assistant"
+    if "hermes_plugins" not in sys.modules:
+        ns = types.ModuleType("hermes_plugins")
+        ns.__path__ = []
+        sys.modules["hermes_plugins"] = ns
+    spec = importlib.util.spec_from_file_location(
+        "hermes_plugins.lchd_personal_assistant",
+        plugin_dir / "__init__.py",
+        submodule_search_locations=[str(plugin_dir)],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "hermes_plugins.lchd_personal_assistant"
+    mod.__path__ = [str(plugin_dir)]
+    sys.modules["hermes_plugins.lchd_personal_assistant"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_unified_plugin_registers_all_tools_and_hooks():
+    plugin = _load_package()
+
+    class Ctx:
+        def __init__(self):
+            self.tools = []
+            self.hooks = []
+
+        def register_tool(self, **kwargs):
+            self.tools.append(kwargs)
+
+        def register_hook(self, name, fn):
+            self.hooks.append((name, fn))
+
+    ctx = Ctx()
+    plugin.register(ctx)
+
+    assert [tool["name"] for tool in ctx.tools] == [
+        "lchd_context_profile",
+        "lchd_vault_lookup",
+        "lchd_runtime_snapshot",
+        "lchd_guardrails_check",
+        "lchd_model_policy",
+        "lchd_status",
+        "lchd_handoff_note",
+    ]
+    assert {tool["toolset"] for tool in ctx.tools} == {"lchd_personal"}
+    assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result"]
+
+
+def test_context_vault_and_runtime_handlers_work():
+    plugin = _load_package()
+
+    profile = json.loads(plugin.handle_context_profile({}))
+    assert profile["profile"]["architecture"] == "dual-engine knowledge base + four specialist SOUL profiles"
+    assert all(profile["profile"]["profile_roles"].values())
+
+    note = json.loads(plugin.handle_vault_lookup({"key": "home"}))
+    assert note["ok"] is True
+    assert note["key"] == "home"
+
+    bad = json.loads(plugin.handle_vault_lookup({"key": "../../etc/passwd"}))
+    assert bad["ok"] is False
+    assert bad["error"] == "unknown_vault_key"
+
+    snap = json.loads(plugin.handle_runtime_snapshot({}))
+    assert snap["runtime"]["model"]["provider"] == "openai-codex"
+    assert "api_key" not in json.dumps(snap).lower()
+
+
+def test_guardrails_and_routing_handlers_work():
+    plugin = _load_package()
+
+    blocked = json.loads(plugin.handle_guardrails_check({"tool_name": "terminal", "args": {"command": "/etc/init.d/sing-box restart"}}))
+    assert blocked["allowed"] is False
+    assert blocked["findings"][0]["id"] == "router_service_mutation"
+
+    allowed = json.loads(plugin.handle_guardrails_check({"tool_name": "terminal", "args": {"command": "echo safe"}}))
+    assert allowed["allowed"] is True
+
+    policy = json.loads(plugin.handle_model_policy({}))
+    assert policy["primary"]["provider"] == "openai-codex"
+    assert policy["fallbacks"]["fallback_providers"][0]["provider"] == "custom:CLIProxyAPI"
+    assert "SECRET" not in json.dumps(policy)
+
+
+def test_status_and_handoff_handlers_work(_isolated_lchd_home):
+    plugin = _load_package()
+
+    status = json.loads(plugin.handle_status({}))
+    assert status["plugins"] == {"lchd-personal-assistant": True}
+    assert status["toolset"] == "lchd_personal"
+
+    result = json.loads(plugin.handle_handoff_note({"title": "瘦身测试", "completed": ["ok"], "next_step": "done"}))
+    path = Path(result["path"])
+    assert path.exists()
+    assert "## 已完成" in path.read_text(encoding="utf-8")

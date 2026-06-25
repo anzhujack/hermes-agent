@@ -1,0 +1,160 @@
+"""Chinese status and handoff helpers for Lchd's Hermes UX."""
+
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+try:
+    from hermes_constants import get_hermes_home
+except Exception:  # pragma: no cover
+    def get_hermes_home() -> Path:
+        import os
+        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+
+_DEFAULT_WIKI = get_hermes_home() / "wiki"
+
+
+def _json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def _load_config() -> dict[str, Any]:
+    try:
+        data = yaml.safe_load((get_hermes_home() / "config.yaml").read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _lchd_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = config.get("lchd_personal")
+    return value if isinstance(value, dict) else {}
+
+
+def _plugins_enabled(config: dict[str, Any]) -> list[str]:
+    plugins = config.get("plugins") or {}
+    enabled = plugins.get("enabled") if isinstance(plugins, dict) else []
+    return [str(x) for x in enabled] if isinstance(enabled, list) else []
+
+
+def _wiki_root(config: dict[str, Any]) -> Path:
+    personal = _lchd_config(config)
+    configured = personal.get("wiki_root")
+    if isinstance(configured, str) and configured:
+        return Path(configured).expanduser()
+    return _DEFAULT_WIKI
+
+
+def _safe_slug(text: str) -> str:
+    text = text.strip() or "handoff"
+    text = re.sub(r"[^\w\-\u4e00-\u9fff]+", "-", text, flags=re.UNICODE).strip("-")
+    return text[:80] or "handoff"
+
+
+def build_status() -> dict[str, Any]:
+    config = _load_config()
+    personal = _lchd_config(config)
+    enabled = _plugins_enabled(config)
+    expected = ["lchd-personal-assistant"]
+    legacy = ["lchd-context", "lchd-guardrails", "lchd-cost-router", "lchd-gateway-ux"]
+    plugin_state = {name: (name in enabled) for name in expected}
+    legacy_state = {name: (name in enabled) for name in legacy}
+    model = config.get("model") or {}
+    if not isinstance(model, dict):
+        model = {}
+    return {
+        "ok": True,
+        "中文阶段摘要": {
+            "已完成": [name for name, ok in plugin_state.items() if ok] + ["Wiki/Obsidian/Profile skeleton"],
+            "未完成": [name for name, ok in plugin_state.items() if not ok],
+            "验证建议": [
+                "scripts/run_tests.sh tests/plugins/test_lchd_*_plugin.py",
+                "cd /root/Documents/Obsidian Vault && python3 scripts/kb-lint.py --links --secrets",
+            ],
+            "下一步": "Phase 6 maintenance scripts/jobs, then final completeness check.",
+        },
+        "paths": {
+            "wiki_root": str(_wiki_root(config)),
+            "obsidian_vault_path": str(personal.get("obsidian_vault_path", "/root/Documents/Obsidian Vault")),
+            "profiles_dir": str(personal.get("profiles_dir", get_hermes_home() / "lchd-profiles")),
+            "dashboard": str(_wiki_root(config) / "system" / "dashboard.md"),
+        },
+        "model": {"provider": model.get("provider"), "default": model.get("default") or model.get("model")},
+        "plugins": plugin_state,
+        "legacy_plugins": legacy_state,
+        "toolset": "lchd_personal",
+    }
+
+
+def handle_status(args: dict | None = None, **_: Any) -> str:
+    return _json(build_status())
+
+
+def handle_handoff_note(args: dict | None = None, **_: Any) -> str:
+    args = args or {}
+    title = str(args.get("title") or "Hermes handoff")
+    completed = args.get("completed") or []
+    pending = args.get("pending") or []
+    verification = args.get("verification") or []
+    next_step = str(args.get("next_step") or "")
+    if not isinstance(completed, list):
+        completed = [str(completed)]
+    if not isinstance(pending, list):
+        pending = [str(pending)]
+    if not isinstance(verification, list):
+        verification = [str(verification)]
+
+    config = _load_config()
+    wiki = _wiki_root(config)
+    out_dir = wiki / "handoffs"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = out_dir / f"{stamp}-{_safe_slug(title)}.md"
+    lines = [
+        f"# {title}",
+        "",
+        f"> Generated: {datetime.now(timezone.utc).isoformat()}",
+        "",
+        "## 已完成",
+        *[f"- {x}" for x in completed],
+        "",
+        "## 未完成",
+        *[f"- {x}" for x in pending],
+        "",
+        "## 验证结果",
+        *[f"- {x}" for x in verification],
+        "",
+        "## 下一步",
+        next_step or "- 待定",
+        "",
+    ]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return _json({"ok": True, "path": str(path), "title": title})
+
+
+LCHD_STATUS_SCHEMA = {
+    "name": "lchd_status",
+    "description": "Return a Chinese phased status summary for Lchd's personalized Hermes project.",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+LCHD_HANDOFF_NOTE_SCHEMA = {
+    "name": "lchd_handoff_note",
+    "description": "Write a compact Chinese handoff note into Lchd's Wiki handoffs directory.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "completed": {"type": "array", "items": {"type": "string"}},
+            "pending": {"type": "array", "items": {"type": "string"}},
+            "verification": {"type": "array", "items": {"type": "string"}},
+            "next_step": {"type": "string"},
+        },
+    },
+}
