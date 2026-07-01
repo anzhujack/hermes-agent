@@ -1271,6 +1271,21 @@ def _read_configured_image_provider():
     return None
 
 
+def _read_configured_image_fallback_provider():
+    """Return optional ``image_gen.fallback_provider`` for image-gen retries."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        if isinstance(section, dict):
+            value = section.get("fallback_provider")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    except Exception as exc:
+        logger.debug("Could not read image_gen.fallback_provider: %s", exc)
+    return None
+
+
 def _dispatch_to_plugin_provider(
     prompt: str,
     aspect_ratio: str,
@@ -1398,6 +1413,45 @@ def _dispatch_to_plugin_provider(
             "error": "Provider returned a non-dict result",
             "error_type": "provider_contract",
         })
+
+    if result.get("success") is False:
+        fallback_name = _read_configured_image_fallback_provider()
+        retryable_error_types = {
+            "auth_required",
+            "api_error",
+            "empty_response",
+            "provider_exception",
+            "task_failed",
+            "rate_limited",
+            "quota_exceeded",
+        }
+        error_type = str(result.get("error_type") or "")
+        if fallback_name and fallback_name != configured and error_type in retryable_error_types:
+            try:
+                fallback = get_provider(fallback_name)
+                if fallback is None:
+                    _ensure_plugins_discovered(force=True)
+                    fallback = get_provider(fallback_name)
+                if fallback is not None and fallback.is_available():
+                    fallback_kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+                    if isinstance(image_url, str) and image_url.strip():
+                        fallback_kwargs["image_url"] = image_url.strip()
+                    if norm_refs:
+                        fallback_kwargs["reference_image_urls"] = norm_refs
+                    fallback_result = fallback.generate(**fallback_kwargs)
+                    if isinstance(fallback_result, dict):
+                        fallback_result.setdefault("fallback_from_provider", configured)
+                        fallback_result.setdefault("fallback_from_error_type", error_type)
+                        fallback_result.setdefault("fallback_from_error", result.get("error"))
+                        return json.dumps(fallback_result)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Image gen fallback provider '%s' raised after '%s' failed: %s",
+                    fallback_name,
+                    configured,
+                    exc,
+                )
+
     return json.dumps(result)
 
 

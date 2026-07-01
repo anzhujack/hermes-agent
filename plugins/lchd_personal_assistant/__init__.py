@@ -25,6 +25,14 @@ from .guardrails import (
     on_pre_tool_call,
     on_transform_tool_result,
 )
+from .orchestrator import (
+    LCHD_EXPERT_REGISTRY_SCHEMA,
+    LCHD_TASK_FINALIZE_SCHEMA,
+    LCHD_TASK_ROUTE_SCHEMA,
+    handle_expert_registry,
+    handle_task_finalize,
+    handle_task_route,
+)
 from .routing import LCHD_MODEL_POLICY_SCHEMA, handle_model_policy
 from .ux import LCHD_HANDOFF_NOTE_SCHEMA, LCHD_STATUS_SCHEMA, handle_handoff_note, handle_status
 
@@ -81,5 +89,26 @@ def register(ctx) -> None:
         toolset=_TOOLSET,
         schema=LCHD_HANDOFF_NOTE_SCHEMA,
         handler=handle_handoff_note,
+        emoji="🧾",
+    )
+    ctx.register_tool(
+        name="lchd_expert_registry",
+        toolset=_TOOLSET,
+        schema=LCHD_EXPERT_REGISTRY_SCHEMA,
+        handler=handle_expert_registry,
+        emoji="🧑‍💼",
+    )
+    ctx.register_tool(
+        name="lchd_task_route",
+        toolset=_TOOLSET,
+        schema=LCHD_TASK_ROUTE_SCHEMA,
+        handler=handle_task_route,
+        emoji="🧭",
+    )
+    ctx.register_tool(
+        name="lchd_task_finalize",
+        toolset=_TOOLSET,
+        schema=LCHD_TASK_FINALIZE_SCHEMA,
+        handler=handle_task_finalize,
         emoji="🧾",
     )

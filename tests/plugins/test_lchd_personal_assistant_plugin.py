@@ -95,6 +95,9 @@ def test_unified_plugin_registers_all_tools_and_hooks():
         "lchd_model_policy",
         "lchd_status",
         "lchd_handoff_note",
+        "lchd_expert_registry",
+        "lchd_task_route",
+        "lchd_task_finalize",
     ]
     assert {tool["toolset"] for tool in ctx.tools} == {"lchd_personal"}
     assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result"]
@@ -147,3 +150,51 @@ def test_status_and_handoff_handlers_work(_isolated_lchd_home):
     path = Path(result["path"])
     assert path.exists()
     assert "## 已完成" in path.read_text(encoding="utf-8")
+
+
+def test_expert_registry_reads_soul_profiles_without_being_status_only():
+    plugin = _load_package()
+
+    registry = json.loads(plugin.handle_expert_registry({"max_chars": 120}))
+
+    assert registry["ok"] is True
+    assert registry["profiles_dir"].endswith("lchd-profiles")
+    assert set(registry["experts"]) == {"coordinator", "researcher", "writer", "builder"}
+    assert all(item["available"] for item in registry["experts"].values())
+    assert registry["experts"]["builder"]["soul_excerpt"].startswith("# builder")
+    assert "task_types" in registry["experts"]["researcher"]
+
+
+def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "继续推进 Hermes v0.2，写代码实现四专家任务路由并跑测试"}))
+
+    assert route["ok"] is True
+    assert route["task_type"] == "hermes_dev"
+    assert route["execution_mode"] == "builder_review"
+    assert route["experts"][0] == "coordinator"
+    assert "builder" in route["experts"]
+    assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["verification"]
+    audit_path = Path(route["audit_path"])
+    assert audit_path.exists()
+    assert json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])["task_type"] == "hermes_dev"
+
+    route_only = json.loads(plugin.handle_task_route({"task": "v0.2 四专家路由最终验证"}))
+    assert route_only["task_type"] == "hermes_dev"
+
+
+def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
+    plugin = _load_package()
+
+    decision = json.loads(plugin.handle_task_finalize({
+        "summary": "实现了四专家任务路由器，新增插件工具和 pytest 覆盖。",
+        "files_changed": ["plugins/lchd_personal_assistant/orchestrator.py", "tests/plugins/test_lchd_personal_assistant_plugin.py"],
+        "verification": ["scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py"],
+    }))
+
+    assert decision["ok"] is True
+    assert decision["recommendations"]["write_handoff"] is True
+    assert decision["recommendations"]["update_wiki"] is True
+    assert decision["recommendations"]["suggest_skill"] is True
+    assert "plugins/lchd_personal_assistant/orchestrator.py" in decision["changed_files"]

@@ -71,13 +71,13 @@ def build_status() -> dict[str, Any]:
     return {
         "ok": True,
         "中文阶段摘要": {
-            "已完成": [name for name, ok in plugin_state.items() if ok] + ["Wiki/Obsidian/Profile skeleton"],
+            "已完成": [name for name, ok in plugin_state.items() if ok] + ["Wiki/Obsidian/Profile skeleton", "v0.2 expert orchestrator"],
             "未完成": [name for name, ok in plugin_state.items() if not ok],
             "验证建议": [
-                "scripts/run_tests.sh tests/plugins/test_lchd_*_plugin.py",
+                "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py",
                 "cd /root/Documents/Obsidian Vault && python3 scripts/kb-lint.py --links --secrets",
             ],
-            "下一步": "Phase 6 maintenance scripts/jobs, then final completeness check.",
+            "下一步": "Optional /restart then /new so gateway chat schema exposes v0.2 expert tools; then commit/cleanup.",
         },
         "paths": {
             "wiki_root": str(_wiki_root(config)),
