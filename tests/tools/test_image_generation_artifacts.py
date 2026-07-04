@@ -1,3 +1,4 @@
+import base64
 import json
 from types import SimpleNamespace
 
@@ -122,3 +123,29 @@ def test_handle_image_generate_postprocesses_plugin_result(monkeypatch, tmp_path
 
     assert seen_task_ids == ["plugin-task"]
     assert result["agent_visible_image"] == "/home/remote/.hermes/cache/images/plugin.png"
+
+
+def test_postprocess_adds_local_image_metadata(monkeypatch, tmp_path):
+    from tools import image_generation_tool
+
+    hermes_home = tmp_path / ".hermes"
+    image_dir = hermes_home / "cache" / "images"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "generated.png"
+    # 1x1 transparent PNG.
+    image_path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    ))
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(image_generation_tool, "_active_terminal_env", lambda task_id: None)
+
+    raw = json.dumps({"success": True, "image": str(image_path)})
+    result = json.loads(image_generation_tool._postprocess_image_generate_result(raw))
+
+    assert result["image"] == str(image_path)
+    assert result["bytes"] > 0
+    assert result["width"] == 1
+    assert result["height"] == 1
+    assert result["format"] == "PNG"
+    assert result["image_metadata"]["width"] == 1

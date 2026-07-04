@@ -371,6 +371,7 @@ class TestRegistryIntegration:
         props = image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
         assert set(props.keys()) == {
             "prompt", "aspect_ratio", "image_url", "reference_image_urls",
+            "size", "quality", "resolution",
         }
         assert image_tool.IMAGE_GENERATE_SCHEMA["parameters"]["required"] == ["prompt"]
 
@@ -438,6 +439,7 @@ class TestManagedGatewayErrorTranslation:
         mock_managed_client.submit.side_effect = bad_request
         monkeypatch.setattr(image_tool, "_get_managed_fal_client",
                             lambda gw: mock_managed_client)
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
 
         with pytest.raises(ValueError) as exc_info:
             image_tool._submit_fal_request("fal-ai/nano-banana-pro", {"prompt": "x"})
@@ -463,6 +465,7 @@ class TestManagedGatewayErrorTranslation:
         mock_managed_client.submit.side_effect = server_error
         monkeypatch.setattr(image_tool, "_get_managed_fal_client",
                             lambda gw: mock_managed_client)
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
 
         with pytest.raises(_MockHttpxError):
             image_tool._submit_fal_request("fal-ai/flux-2-pro", {"prompt": "x"})
@@ -498,6 +501,7 @@ class TestManagedGatewayErrorTranslation:
         mock_managed_client.submit.side_effect = conn_error
         monkeypatch.setattr(image_tool, "_get_managed_fal_client",
                             lambda gw: mock_managed_client)
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
 
         with pytest.raises(ConnectionError):
             image_tool._submit_fal_request("fal-ai/flux-2-pro", {"prompt": "x"})

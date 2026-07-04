@@ -15,18 +15,53 @@ def _reset_registry():
 
 
 class _FakeCodexProvider(ImageGenProvider):
+    def __init__(self, *, success=True, error_type="api_error", model="gpt-5.2-codex"):
+        self.calls = []
+        self._success = success
+        self._error_type = error_type
+        self._model = model
+
     @property
     def name(self) -> str:
         return "codex"
 
     def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        self.calls.append({"prompt": prompt, "aspect_ratio": aspect_ratio, **kwargs})
+        if not self._success:
+            return {
+                "success": False,
+                "image": None,
+                "error": "primary failed",
+                "error_type": self._error_type,
+                "model": self._model,
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+                "provider": "codex",
+            }
         return {
             "success": True,
             "image": "/tmp/codex-test.png",
-            "model": "gpt-5.2-codex",
+            "model": kwargs.get("model", self._model),
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
             "provider": "codex",
+        }
+
+
+class _FakeFallbackProvider(_FakeCodexProvider):
+    @property
+    def name(self) -> str:
+        return "backup"
+
+    def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        self.calls.append({"prompt": prompt, "aspect_ratio": aspect_ratio, **kwargs})
+        return {
+            "success": True,
+            "image": "/tmp/backup-test.png",
+            "model": kwargs.get("model", "backup-default"),
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "provider": "backup",
         }
 
 
@@ -97,3 +132,71 @@ class TestPluginDispatch:
         assert payload["success"] is True
         assert payload["provider"] == "codex"
         assert payload["aspect_ratio"] == "portrait"
+
+    def test_dispatch_forwards_quality_resolution_and_size(self, monkeypatch, tmp_path):
+        from tools import image_generation_tool
+        from hermes_cli import plugins as plugins_module
+        from agent import image_gen_registry as registry_module
+
+        provider = _FakeCodexProvider()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_model", lambda: "gpt-image-2-vip")
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda force=False: None)
+        monkeypatch.setattr(registry_module, "get_provider", lambda name: provider if name == "codex" else None)
+
+        dispatched = image_generation_tool._dispatch_to_plugin_provider(
+            "draw cat", "portrait", size="1024x1536", quality="high", resolution="2k"
+        )
+        payload = json.loads(dispatched)
+
+        assert payload["success"] is True
+        assert provider.calls[0]["model"] == "gpt-image-2-vip"
+        assert provider.calls[0]["size"] == "1024x1536"
+        assert provider.calls[0]["quality"] == "high"
+        assert provider.calls[0]["resolution"] == "2k"
+
+    def test_retryable_failure_uses_ordered_fallback_chain_models_and_options(self, monkeypatch, tmp_path):
+        from tools import image_generation_tool
+        from hermes_cli import plugins as plugins_module
+        from agent import image_gen_registry as registry_module
+
+        primary = _FakeCodexProvider(success=False, error_type="api_error")
+        first_backup = _FakeCodexProvider(success=False, error_type="api_error")
+        second_backup = _FakeFallbackProvider()
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_model", lambda: "primary-model")
+        monkeypatch.setattr(
+            image_generation_tool,
+            "_read_configured_image_fallback_providers",
+            lambda: [
+                {"provider": "first-backup", "model": "first-model"},
+                {"provider": "backup", "model": "backup-model"},
+            ],
+        )
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda force=False: None)
+        monkeypatch.setattr(
+            registry_module,
+            "get_provider",
+            lambda name: {
+                "codex": primary,
+                "first-backup": first_backup,
+                "backup": second_backup,
+            }.get(name),
+        )
+
+        dispatched = image_generation_tool._dispatch_to_plugin_provider(
+            "draw cat", "square", size="2048x2048", quality="high", resolution="4k"
+        )
+        payload = json.loads(dispatched)
+
+        assert payload["success"] is True
+        assert payload["provider"] == "backup"
+        assert payload["fallback"] is True
+        assert payload["fallback_from_provider"] == "codex"
+        assert first_backup.calls[0]["model"] == "first-model"
+        assert second_backup.calls[0]["model"] == "backup-model"
+        assert second_backup.calls[0]["size"] == "2048x2048"
+        assert second_backup.calls[0]["quality"] == "high"
+        assert second_backup.calls[0]["resolution"] == "4k"

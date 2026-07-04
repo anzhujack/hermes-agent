@@ -26,6 +26,7 @@ import os
 import datetime
 import threading
 import uuid
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 # fal_client is imported lazily — see _load_fal_client(). Pulling it
@@ -822,10 +823,16 @@ def _postprocess_image_generate_result(raw: str, task_id: str | None = None) -> 
     if not isinstance(image, str) or not _looks_like_absolute_file_path(image):
         return raw
 
+    metadata = _local_image_metadata(image)
+    if metadata:
+        payload.setdefault("image_metadata", metadata)
+        for key, value in metadata.items():
+            payload.setdefault(key, value)
+
     env = _active_terminal_env(task_id)
     agent_path = _agent_visible_cache_path(image, env)
     if not agent_path or agent_path == image:
-        return raw
+        return json.dumps(payload, ensure_ascii=False)
 
     if env is not None:
         _force_artifact_sync(env)
@@ -833,6 +840,29 @@ def _postprocess_image_generate_result(raw: str, task_id: str | None = None) -> 
     payload.setdefault("host_image", image)
     payload.setdefault("agent_visible_image", agent_path)
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _local_image_metadata(image_path: str) -> Dict[str, Any]:
+    """Best-effort metadata for locally materialised image artifacts."""
+    out: Dict[str, Any] = {}
+    try:
+        path = Path(image_path)
+        if not path.exists() or not path.is_file():
+            return out
+        out["bytes"] = path.stat().st_size
+        try:
+            from PIL import Image
+
+            with Image.open(path) as img:
+                out["width"] = int(img.width)
+                out["height"] = int(img.height)
+                if img.format:
+                    out["format"] = str(img.format)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not inspect image metadata for %s: %s", image_path, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not stat generated image artifact %s: %s", image_path, exc)
+    return out
 
 
 def image_generate_tool(
@@ -1226,6 +1256,30 @@ IMAGE_GENERATE_SCHEMA = {
                     "capped per-model; the description above indicates the max."
                 ),
             },
+            "size": {
+                "type": "string",
+                "description": (
+                    "Optional provider-specific output size such as 1024x1536, "
+                    "1536x1024, 1024x1024, 2K, or 4K. Unsupported providers "
+                    "ignore or reject it with a clear error."
+                ),
+            },
+            "quality": {
+                "type": "string",
+                "description": (
+                    "Optional provider-specific quality tier such as low, medium, "
+                    "high, or auto. Use high when the user prioritizes fidelity "
+                    "over cost/latency."
+                ),
+            },
+            "resolution": {
+                "type": "string",
+                "description": (
+                    "Optional provider-specific resolution tier such as 1k, 2k, "
+                    "or 4k. Useful for providers that separate aspect ratio from "
+                    "rendering resolution."
+                ),
+            },
         },
         "required": ["prompt"],
     },
@@ -1272,17 +1326,77 @@ def _read_configured_image_provider():
 
 
 def _read_configured_image_fallback_provider():
-    """Return optional ``image_gen.fallback_provider`` for image-gen retries."""
+    """Return optional legacy ``image_gen.fallback_provider`` for retries."""
+    fallbacks = _read_configured_image_fallback_providers()
+    if fallbacks:
+        return fallbacks[0].get("provider")
+    return None
+
+
+def _read_configured_image_fallback_providers() -> list[Dict[str, Any]]:
+    """Return ordered image-gen fallback entries.
+
+    Preferred config is ``image_gen.fallback_providers`` as a list of entries:
+    ``[{provider: apimart, model: gpt-image-2}, ...]``. The legacy single
+    ``image_gen.fallback_provider`` string is appended for backward
+    compatibility when no duplicate route exists.
+    """
+    entries: list[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     try:
         from hermes_cli.config import load_config
         cfg = load_config()
         section = cfg.get("image_gen") if isinstance(cfg, dict) else None
-        if isinstance(section, dict):
-            value = section.get("fallback_provider")
+        if not isinstance(section, dict):
+            return entries
+
+        def add(provider: Any, model: Any = None) -> None:
+            if not isinstance(provider, str) or not provider.strip():
+                return
+            item: Dict[str, Any] = {"provider": provider.strip()}
+            if isinstance(model, str) and model.strip():
+                item["model"] = model.strip()
+            ident = (item["provider"], str(item.get("model") or ""))
+            if ident in seen:
+                return
+            seen.add(ident)
+            entries.append(item)
+
+        configured_list = section.get("fallback_providers")
+        if isinstance(configured_list, list):
+            for raw in configured_list:
+                if isinstance(raw, str):
+                    add(raw)
+                elif isinstance(raw, dict):
+                    add(raw.get("provider"), raw.get("model"))
+
+        legacy = section.get("fallback_provider")
+        if isinstance(legacy, str) and legacy.strip():
+            scoped_model = None
+            scoped = section.get(legacy.strip())
+            if isinstance(scoped, dict):
+                scoped_model = scoped.get("model")
+            add(legacy, scoped_model)
+    except Exception as exc:
+        logger.debug("Could not read image_gen fallback providers: %s", exc)
+    return entries
+
+
+def _read_scoped_image_model(provider_name: str) -> Optional[str]:
+    """Return ``image_gen.<provider_name>.model`` for provider-specific routing."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        section = cfg.get("image_gen") if isinstance(cfg, dict) else None
+        if not isinstance(section, dict):
+            return None
+        scoped = section.get(provider_name)
+        if isinstance(scoped, dict):
+            value = scoped.get("model")
             if isinstance(value, str) and value.strip():
                 return value.strip()
     except Exception as exc:
-        logger.debug("Could not read image_gen.fallback_provider: %s", exc)
+        logger.debug("Could not read image_gen.%s.model: %s", provider_name, exc)
     return None
 
 
@@ -1291,6 +1405,9 @@ def _dispatch_to_plugin_provider(
     aspect_ratio: str,
     image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None,
+    size: Optional[str] = None,
+    quality: Optional[str] = None,
+    resolution: Optional[str] = None,
 ):
     """Route the call to a plugin-registered provider when one is selected.
 
@@ -1361,6 +1478,12 @@ def _dispatch_to_plugin_provider(
             norm_refs = normalize_reference_images(reference_image_urls)
         if norm_refs:
             kwargs["reference_image_urls"] = norm_refs
+        if isinstance(size, str) and size.strip():
+            kwargs["size"] = size.strip()
+        if isinstance(quality, str) and quality.strip():
+            kwargs["quality"] = quality.strip()
+        if isinstance(resolution, str) and resolution.strip():
+            kwargs["resolution"] = resolution.strip()
         result = provider.generate(**kwargs)
     except TypeError as exc:
         # A provider whose generate() signature predates image_url support
@@ -1415,7 +1538,6 @@ def _dispatch_to_plugin_provider(
         })
 
     if result.get("success") is False:
-        fallback_name = _read_configured_image_fallback_provider()
         retryable_error_types = {
             "auth_required",
             "api_error",
@@ -1426,31 +1548,53 @@ def _dispatch_to_plugin_provider(
             "quota_exceeded",
         }
         error_type = str(result.get("error_type") or "")
-        if fallback_name and fallback_name != configured and error_type in retryable_error_types:
-            try:
-                fallback = get_provider(fallback_name)
-                if fallback is None:
-                    _ensure_plugins_discovered(force=True)
+        if error_type in retryable_error_types:
+            for fallback_entry in _read_configured_image_fallback_providers():
+                fallback_name = fallback_entry.get("provider")
+                if not fallback_name or fallback_name == configured:
+                    continue
+                try:
                     fallback = get_provider(fallback_name)
-                if fallback is not None and fallback.is_available():
-                    fallback_kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
-                    if isinstance(image_url, str) and image_url.strip():
-                        fallback_kwargs["image_url"] = image_url.strip()
-                    if norm_refs:
-                        fallback_kwargs["reference_image_urls"] = norm_refs
-                    fallback_result = fallback.generate(**fallback_kwargs)
-                    if isinstance(fallback_result, dict):
-                        fallback_result.setdefault("fallback_from_provider", configured)
-                        fallback_result.setdefault("fallback_from_error_type", error_type)
-                        fallback_result.setdefault("fallback_from_error", result.get("error"))
-                        return json.dumps(fallback_result)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Image gen fallback provider '%s' raised after '%s' failed: %s",
-                    fallback_name,
-                    configured,
-                    exc,
-                )
+                    if fallback is None:
+                        _ensure_plugins_discovered(force=True)
+                        fallback = get_provider(fallback_name)
+                    if fallback is not None and fallback.is_available():
+                        fallback_kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
+                        fallback_model = fallback_entry.get("model") or _read_scoped_image_model(fallback_name)
+                        if fallback_model:
+                            fallback_kwargs["model"] = fallback_model
+                        if isinstance(image_url, str) and image_url.strip():
+                            fallback_kwargs["image_url"] = image_url.strip()
+                        if norm_refs:
+                            fallback_kwargs["reference_image_urls"] = norm_refs
+                        if isinstance(size, str) and size.strip():
+                            fallback_kwargs["size"] = size.strip()
+                        if isinstance(quality, str) and quality.strip():
+                            fallback_kwargs["quality"] = quality.strip()
+                        if isinstance(resolution, str) and resolution.strip():
+                            fallback_kwargs["resolution"] = resolution.strip()
+                        fallback_result = fallback.generate(**fallback_kwargs)
+                        if isinstance(fallback_result, dict) and fallback_result.get("success") is not False:
+                            fallback_result.setdefault("fallback", True)
+                            fallback_result.setdefault("fallback_from_provider", configured)
+                            fallback_result.setdefault("fallback_from_error_type", error_type)
+                            fallback_result.setdefault("fallback_from_error", result.get("error"))
+                            fallback_result.setdefault("fallback_provider", fallback_name)
+                            return json.dumps(fallback_result)
+                        if isinstance(fallback_result, dict):
+                            logger.info(
+                                "Image gen fallback provider '%s' returned failure after '%s': %s",
+                                fallback_name,
+                                configured,
+                                fallback_result.get("error") or fallback_result.get("error_type"),
+                            )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Image gen fallback provider '%s' raised after '%s' failed: %s",
+                        fallback_name,
+                        configured,
+                        exc,
+                    )
 
     return json.dumps(result)
 
@@ -1571,6 +1715,9 @@ def _handle_image_generate(args, **kw):
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     image_url = args.get("image_url")
     reference_image_urls = args.get("reference_image_urls")
+    size = args.get("size")
+    quality = args.get("quality")
+    resolution = args.get("resolution")
     task_id = kw.get("task_id")
 
     # Route to a plugin-registered provider if one is active (and it's
@@ -1580,6 +1727,9 @@ def _handle_image_generate(args, **kw):
         prompt, aspect_ratio,
         image_url=image_url,
         reference_image_urls=reference_image_urls,
+        size=size,
+        quality=quality,
+        resolution=resolution,
     )
     if dispatched is not None:
         return _postprocess_image_generate_result(dispatched, task_id=task_id)
