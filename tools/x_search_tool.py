@@ -98,6 +98,31 @@ def _get_x_search_retries() -> int:
         return DEFAULT_X_SEARCH_RETRIES
 
 
+def _get_x_search_base_url() -> str:
+    """Return an x_search-specific base URL override, if configured."""
+    cfg = _load_x_search_config()
+    return str(cfg.get("base_url") or "").strip().rstrip("/")
+
+
+def _get_x_search_api_key() -> str:
+    """Return an x_search-specific API key from the configured env var.
+
+    This deliberately resolves through Hermes' dotenv-aware config helper so
+    the secret can live in ``~/.hermes/.env`` without being exported into the
+    gateway process environment.
+    """
+    cfg = _load_x_search_config()
+    env_name = str(cfg.get("api_key_env") or "").strip()
+    if not env_name:
+        return ""
+    try:
+        from hermes_cli.config import get_env_value
+
+        return str(get_env_value(env_name) or "").strip()
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Credential resolution
 # ---------------------------------------------------------------------------
@@ -112,6 +137,11 @@ def _resolve_xai_bearer() -> Tuple[str, str, str]:
     check exists so a credential that expires between registration and
     invocation produces a clean tool error instead of a 401.
     """
+    configured_api_key = _get_x_search_api_key()
+    configured_base_url = _get_x_search_base_url()
+    if configured_api_key:
+        return configured_api_key, configured_base_url or DEFAULT_XAI_BASE_URL, "x_search-config"
+
     creds = resolve_xai_http_credentials()
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
@@ -132,6 +162,9 @@ def check_x_search_requirements() -> bool:
     auto-refreshes the OAuth access token if it's expiring; a successful
     return therefore implies a usable bearer.
     """
+    configured_api_key = _get_x_search_api_key()
+    if configured_api_key:
+        return True
     try:
         creds = resolve_xai_http_credentials()
         return bool(str(creds.get("api_key") or "").strip())
