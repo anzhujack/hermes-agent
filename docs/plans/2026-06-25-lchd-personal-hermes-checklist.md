@@ -67,8 +67,14 @@ Build Lchd's Hermes into a Chinese-first, cost-aware, self-improving private ass
    - `lchd_status(recent_routes=N)` returns `recent_expert_routes`.
    - `lchd_task_route` returns `risk_level`, `requires_confirmation`, `human_gate` and records them in audit JSONL.
    - `lchd_task_finalize` returns `enforcement` hints for end-of-task persistence review.
-4. **Next candidate** — v0.4 expert-driven delegation.
-   - Do not add automatic fan-out until route conditions, context trimming, audit logging, and failure rollback are designed.
+4. **v0.4 Expert Delegation Planner** — implemented.
+   - `lchd_task_route` returns `delegation` with `recommended`, `mode`, `dispatch_allowed`, `tasks`, `parent_verification`, `merge_strategy`, and `abort_conditions`.
+   - Human gate dominates delegation: high-risk tasks set `dispatch_allowed=false` until Lchd confirms.
+   - Audit JSONL records compact `delegation_summary`; `lchd_status(recent_routes=N)` surfaces it in `recent_expert_routes`.
+   - Planner does not directly spawn subagents and does not emit unsupported `toolsets` fields.
+5. **Next candidate** — v0.5 route-first habit hardening / optional semi-automatic parent-agent delegation.
+   - Only execute planned tasks when `delegation.recommended=true` and `dispatch_allowed=true`.
+   - Parent agent must verify child summaries before reporting success.
 
 ## First Implementation Slice
 

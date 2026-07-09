@@ -3,8 +3,8 @@
 This module turns the v0.1 static SOUL profile skeleton into a verifiable
 routing layer. It remains deliberately small: no new core tools, no external
 agent framework, and no automatic side effects beyond an audit JSONL that lets
-future sessions prove routing happened. v0.3 adds observable human gates and
-task-finalize enforcement hints before adding automatic delegation.
+future sessions prove routing happened. v0.4 adds a guarded delegation planner
+that tells the parent agent when subagent fan-out is useful without spawning it.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
         return {}
 
 _ROLE_ORDER = ("coordinator", "researcher", "writer", "builder")
-_PLUGIN_VERSION = "0.3.0"
+_PLUGIN_VERSION = "0.4.0"
 _ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "coordinator": {
         "label": "项目经理",
@@ -171,21 +171,21 @@ def build_expert_registry(max_chars: int = 800) -> dict[str, Any]:
 
 def _classify_task(task: str, context: str = "") -> dict[str, Any]:
     text = f"{task}\n{context}".lower()
-    if any(term in text for term in ("hermes", "插件", "plugin", "代码", "test", "pytest", "实现", "修复", "debug", "gateway", "配置", "v0.2", "路由", "orchestrator", "专家")):
-        return {
-            "task_type": "hermes_dev",
-            "execution_mode": "builder_review",
-            "experts": ["coordinator", "builder", "writer"],
-            "knowledge_sources": ["repo", "config", "session_search", "wiki"],
-            "verification": ["scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py"],
-        }
-    if any(term in text for term in ("调研", "搜索", "research", "比较", "方案", "资料", "来源")):
+    if any(term in text for term in ("联网", "调研", "搜索", "research", "比较", "资料", "来源", "web", "human-in-the-loop", "多智能体")):
         return {
             "task_type": "research",
             "execution_mode": "parallel_research",
             "experts": ["coordinator", "researcher", "writer"],
             "knowledge_sources": ["web", "session_search", "obsidian"],
             "verification": ["cite authoritative sources", "cross-check claims"],
+        }
+    if any(term in text for term in ("hermes", "插件", "plugin", "代码", "test", "pytest", "实现", "修复", "debug", "gateway", "配置", "v0.2", "v0.3", "v0.4", "路由", "orchestrator", "专家", "delegation")):
+        return {
+            "task_type": "hermes_dev",
+            "execution_mode": "builder_review",
+            "experts": ["coordinator", "builder", "writer"],
+            "knowledge_sources": ["repo", "config", "session_search", "wiki"],
+            "verification": ["scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py"],
         }
     if any(term in text for term in ("小说", "正文", "大纲", "文案", "总结", "报告", "写", "润色")):
         return {
@@ -285,6 +285,251 @@ def _assess_human_gate(task: str, context: str, route: dict[str, Any]) -> dict[s
     }
 
 
+def _delegation_context(
+    *,
+    expert: str,
+    user_task: str,
+    extra_context: str,
+    route: dict[str, Any],
+    allowed: list[str],
+    forbidden: list[str],
+    verification: list[str],
+    output_contract: list[str],
+) -> str:
+    route_summary = {
+        "task_type": route.get("task_type"),
+        "execution_mode": route.get("execution_mode"),
+        "risk_level": route.get("risk_level"),
+        "human_gate_required": route.get("human_gate", {}).get("required"),
+        "experts": route.get("experts", []),
+    }
+    lines = [
+        f"You are Lchd Personal Hermes' {expert} expert subagent.",
+        "",
+        "User task:",
+        user_task,
+        "",
+        "Route summary:",
+        json.dumps(route_summary, ensure_ascii=False, sort_keys=True),
+    ]
+    if extra_context:
+        lines.extend(["", "Extra parent context:", extra_context])
+    lines.extend([
+        "",
+        "Allowed actions:",
+        *[f"- {item}" for item in allowed],
+        "",
+        "Forbidden actions:",
+        *[f"- {item}" for item in forbidden],
+        "",
+        "Verification expected:",
+        *[f"- {item}" for item in verification],
+        "",
+        "Output contract:",
+        *[f"- {item}" for item in output_contract],
+        "",
+        "Do not write memory. Do not claim external side effects succeeded unless you return verifiable evidence.",
+    ])
+    return "\n".join(lines)
+
+
+def _planned_task(
+    *,
+    expert: str,
+    goal: str,
+    user_task: str,
+    extra_context: str,
+    route: dict[str, Any],
+    allowed: list[str],
+    forbidden: list[str],
+    verification: list[str],
+    output_contract: list[str],
+) -> dict[str, Any]:
+    return {
+        "expert": expert,
+        "goal": goal,
+        "context": _delegation_context(
+            expert=expert,
+            user_task=user_task,
+            extra_context=extra_context,
+            route=route,
+            allowed=allowed,
+            forbidden=forbidden,
+            verification=verification,
+            output_contract=output_contract,
+        ),
+        "role": "leaf",
+    }
+
+
+def _base_delegation_plan(route: dict[str, Any]) -> dict[str, Any]:
+    blocked = bool(route.get("human_gate", {}).get("required"))
+    return {
+        "recommended": False,
+        "mode": "none",
+        "dispatch_allowed": False,
+        "blocked_until_confirmation": blocked,
+        "reason": "Direct parent-agent handling is sufficient.",
+        "tasks": [],
+        "task_count": 0,
+        "parent_verification": list(route.get("verification") or []),
+        "merge_strategy": "Parent agent synthesizes child summaries and verifies them before final response.",
+        "abort_conditions": [
+            "human_gate.required is true",
+            "child task would need credentials or user clarification",
+            "child reports external side effects without verifiable handle",
+        ],
+    }
+
+
+def _with_tasks(plan: dict[str, Any], tasks: list[dict[str, Any]], *, blocked: bool) -> dict[str, Any]:
+    tasks = tasks[:3]
+    plan = {**plan, "tasks": tasks, "task_count": len(tasks)}
+    if blocked:
+        return {**plan, "recommended": False, "dispatch_allowed": False, "blocked_until_confirmation": True}
+    return {**plan, "recommended": bool(tasks), "dispatch_allowed": bool(tasks), "blocked_until_confirmation": False}
+
+
+def _build_delegation_plan(task: str, context: str, route: dict[str, Any]) -> dict[str, Any]:
+    plan = _base_delegation_plan(route)
+    blocked = bool(route.get("human_gate", {}).get("required"))
+    task_type = str(route.get("task_type") or "")
+    verification = list(route.get("verification") or [])
+    common_forbidden = [
+        "write persistent memory",
+        "publish, upload, pay, delete, restart services, or mutate init scripts",
+        "modify files outside the explicit allowed scope",
+        "invent facts or cite sources not actually inspected",
+    ]
+    if task_type == "research":
+        plan.update({
+            "mode": "parallel_research",
+            "reason": "The task benefits from isolated source-finding and synthesis workstreams.",
+            "parent_verification": ["cite authoritative sources", "cross-check claims", "separate sourced facts from recommendations"],
+            "merge_strategy": "Parent agent compares sourced findings, resolves conflicts, and writes the final Chinese plan.",
+        })
+        tasks = [
+            _planned_task(
+                expert="researcher",
+                goal="Find authoritative Hermes delegation and plugin constraints relevant to this task.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=["read official docs", "inspect local source paths named by the parent", "return citations and uncertainty"],
+                forbidden=common_forbidden,
+                verification=plan["parent_verification"],
+                output_contract=["key findings", "source URLs or file paths", "constraints", "risks"],
+            ),
+            _planned_task(
+                expert="researcher",
+                goal="Compare multi-agent human-in-the-loop patterns for audit, gating, and failure rollback.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=["web research", "source comparison", "flag conflicts"],
+                forbidden=common_forbidden,
+                verification=plan["parent_verification"],
+                output_contract=["pattern summary", "trade-offs", "recommended boundary for Lchd"],
+            ),
+            _planned_task(
+                expert="writer",
+                goal="Turn verified findings into a concise Chinese proposal draft without adding new facts.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=["structure findings", "clarify trade-offs", "write Chinese draft"],
+                forbidden=common_forbidden,
+                verification=plan["parent_verification"],
+                output_contract=["draft outline", "assumptions", "open questions"],
+            ),
+        ]
+        return _with_tasks(plan, tasks, blocked=blocked)
+    if task_type == "hermes_dev":
+        plan.update({
+            "mode": "builder_review",
+            "reason": "Hermes plugin development should be implemented by a builder then reviewed and verified by the parent.",
+            "parent_verification": verification,
+            "merge_strategy": "Prefer sequential builder implementation then coordinator/spec review; parent agent runs tests and reads diffs.",
+        })
+        tasks = [
+            _planned_task(
+                expert="builder",
+                goal="Implement the smallest tested slice for the requested Lchd Personal Hermes change.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=[
+                    "modify plugins/lchd_personal_assistant/ only when needed",
+                    "modify tests/plugins/test_lchd_personal_assistant_plugin.py",
+                    "run focused tests and py_compile",
+                ],
+                forbidden=common_forbidden + ["modify Hermes core tools", "restart gateway without explicit parent approval"],
+                verification=verification,
+                output_contract=["changed files", "tests run", "risks", "remaining work"],
+            ),
+            _planned_task(
+                expert="coordinator",
+                goal="Review the implementation plan or diff for scope, guardrails, and verification gaps.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=["review diffs", "check guardrails", "suggest missing tests"],
+                forbidden=common_forbidden + ["make unverified success claims"],
+                verification=verification,
+                output_contract=["review verdict", "must-fix items", "nice-to-have items"],
+            ),
+        ]
+        return _with_tasks(plan, tasks, blocked=blocked)
+    if task_type == "writing":
+        plan.update({
+            "mode": "writer_synthesis",
+            "reason": "Writing tasks can be drafted by a writer expert while the parent checks continuity and user intent.",
+            "parent_verification": verification,
+            "merge_strategy": "Parent agent adapts the writer draft to the current conversation and checks for style/continuity.",
+        })
+        tasks = [_planned_task(
+            expert="writer",
+            goal="Draft the requested Chinese writing/synthesis output in Lchd's preferred style.",
+            user_task=task,
+            extra_context=context,
+            route=route,
+            allowed=["write draft", "summarize", "flag style assumptions"],
+            forbidden=common_forbidden + ["publish or send externally"],
+            verification=verification,
+            output_contract=["draft", "style notes", "continuity checks"],
+        )]
+        return _with_tasks(plan, tasks, blocked=blocked)
+    if task_type == "ops":
+        plan.update({
+            "mode": "guarded_diagnosis",
+            "reason": "Ops work is only delegable for read-only diagnosis; mutation waits for Lchd confirmation.",
+            "parent_verification": verification,
+            "merge_strategy": "Parent agent verifies live system state before any action and asks before service mutation.",
+        })
+        tasks = [] if blocked else [_planned_task(
+            expert="builder",
+            goal="Perform read-only diagnosis and propose a guarded operations plan.",
+            user_task=task,
+            extra_context=context,
+            route=route,
+            allowed=["read logs", "inspect config", "run non-destructive status checks"],
+            forbidden=common_forbidden + ["restart services", "edit init scripts", "delete or rollback"],
+            verification=verification,
+            output_contract=["findings", "proposed safe next action", "confirmation needed"],
+        )]
+        return _with_tasks(plan, tasks, blocked=blocked)
+    return plan
+
+
+def _delegation_summary(delegation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "recommended": bool(delegation.get("recommended")),
+        "mode": str(delegation.get("mode") or "none"),
+        "dispatch_allowed": bool(delegation.get("dispatch_allowed")),
+        "task_count": int(delegation.get("task_count") or len(delegation.get("tasks") or [])),
+    }
+
+
 def _append_audit(record: dict[str, Any]) -> Path:
     path = _wiki_root() / "logs" / "expert_routes.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,11 +545,15 @@ def build_task_route(task: str, context: str = "") -> dict[str, Any]:
         return {"ok": False, "error": "missing_task"}
     route = _classify_task(task, context)
     route = {**route, **_assess_human_gate(task, context, route)}
+    delegation = _build_delegation_plan(task, context, route)
+    route = {**route, "delegation": delegation}
+    route_for_audit = {key: value for key, value in route.items() if key != "delegation"}
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "task": task[:500],
         "context_present": bool(context),
-        **route,
+        **route_for_audit,
+        "delegation_summary": _delegation_summary(delegation),
     }
     audit_path = _append_audit(record)
     return {

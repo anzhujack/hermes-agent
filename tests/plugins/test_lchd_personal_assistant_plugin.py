@@ -165,6 +165,12 @@ def test_status_and_handoff_handlers_work(_isolated_lchd_home):
                     "experts": ["coordinator", "builder", "writer"],
                     "risk_level": "medium",
                     "requires_confirmation": False,
+                    "delegation_summary": {
+                        "recommended": True,
+                        "mode": "builder_review",
+                        "dispatch_allowed": True,
+                        "task_count": 2,
+                    },
                 },
             ]
         )
@@ -177,6 +183,12 @@ def test_status_and_handoff_handlers_work(_isolated_lchd_home):
     assert status["toolset"] == "lchd_personal"
     assert [route["task"] for route in status["recent_expert_routes"]] == ["新任务"]
     assert status["recent_expert_routes"][0]["risk_level"] == "medium"
+    assert status["recent_expert_routes"][0]["delegation_summary"] == {
+        "recommended": True,
+        "mode": "builder_review",
+        "dispatch_allowed": True,
+        "task_count": 2,
+    }
 
     result = json.loads(plugin.handle_handoff_note({"title": "瘦身测试", "completed": ["ok"], "next_step": "done"}))
     path = Path(result["path"])
@@ -208,15 +220,24 @@ def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
     assert route["experts"][0] == "coordinator"
     assert "builder" in route["experts"]
     assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["verification"]
-    assert route["version"] == "0.3.0"
+    assert route["version"] == "0.4.0"
     assert route["risk_level"] == "medium"
     assert route["requires_confirmation"] is False
     assert route["human_gate"]["required"] is False
+    assert route["delegation"]["mode"] == "builder_review"
+    assert route["delegation"]["recommended"] is True
+    assert route["delegation"]["dispatch_allowed"] is True
     audit_path = Path(route["audit_path"])
     assert audit_path.exists()
     audit = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
     assert audit["task_type"] == "hermes_dev"
     assert audit["risk_level"] == "medium"
+    assert audit["delegation_summary"] == {
+        "recommended": True,
+        "mode": "builder_review",
+        "dispatch_allowed": True,
+        "task_count": 2,
+    }
 
     route_only = json.loads(plugin.handle_task_route({"task": "v0.2 四专家路由最终验证"}))
     assert route_only["task_type"] == "hermes_dev"
@@ -233,6 +254,43 @@ def test_task_route_marks_human_gate_for_high_risk_ops(_isolated_lchd_home):
     assert route["requires_confirmation"] is True
     assert route["human_gate"]["required"] is True
     assert route["human_gate"]["reason"]
+    assert route["delegation"]["mode"] == "guarded_diagnosis"
+    assert route["delegation"]["recommended"] is False
+    assert route["delegation"]["dispatch_allowed"] is False
+    assert route["delegation"]["blocked_until_confirmation"] is True
+
+
+def test_task_route_builds_parallel_research_delegation_plan(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "联网搜索 Hermes delegate_task 和多智能体 human-in-the-loop 方案，给我 v0.4 方案"}))
+
+    assert route["ok"] is True
+    assert route["version"] == "0.4.0"
+    assert route["task_type"] == "research"
+    assert route["delegation"]["recommended"] is True
+    assert route["delegation"]["mode"] == "parallel_research"
+    assert route["delegation"]["dispatch_allowed"] is True
+    assert 1 <= len(route["delegation"]["tasks"]) <= 3
+    assert {task["expert"] for task in route["delegation"]["tasks"]} <= {"researcher", "writer"}
+    assert "cite authoritative sources" in route["delegation"]["parent_verification"]
+    assert "toolsets" not in json.dumps(route["delegation"], ensure_ascii=False)
+
+
+def test_task_route_builds_builder_review_delegation_plan(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "实现 lchd personal assistant v0.4 delegation planner 并跑测试"}))
+
+    assert route["ok"] is True
+    assert route["task_type"] == "hermes_dev"
+    assert route["delegation"]["mode"] == "builder_review"
+    assert route["delegation"]["recommended"] is True
+    assert route["delegation"]["dispatch_allowed"] is True
+    assert route["delegation"]["tasks"][0]["expert"] == "builder"
+    assert route["delegation"]["tasks"][1]["expert"] == "coordinator"
+    assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["delegation"]["parent_verification"]
+    assert "toolsets" not in json.dumps(route["delegation"], ensure_ascii=False)
 
 
 def test_task_route_does_not_escalate_negated_restart_language(_isolated_lchd_home):
@@ -257,7 +315,7 @@ def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
     }))
 
     assert decision["ok"] is True
-    assert decision["version"] == "0.3.0"
+    assert decision["version"] == "0.4.0"
     assert decision["recommendations"]["write_handoff"] is True
     assert decision["recommendations"]["update_wiki"] is True
     assert decision["recommendations"]["suggest_skill"] is True
