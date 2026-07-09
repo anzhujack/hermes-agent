@@ -142,9 +142,41 @@ def test_guardrails_and_routing_handlers_work():
 def test_status_and_handoff_handlers_work(_isolated_lchd_home):
     plugin = _load_package()
 
-    status = json.loads(plugin.handle_status({}))
+    audit_path = _isolated_lchd_home / "wiki" / "logs" / "expert_routes.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        "\n".join(
+            json.dumps(record, ensure_ascii=False)
+            for record in [
+                {
+                    "ts": "2026-01-01T00:00:00+00:00",
+                    "task": "旧任务",
+                    "task_type": "research",
+                    "execution_mode": "parallel_research",
+                    "experts": ["coordinator", "researcher", "writer"],
+                    "risk_level": "low",
+                    "requires_confirmation": False,
+                },
+                {
+                    "ts": "2026-01-02T00:00:00+00:00",
+                    "task": "新任务",
+                    "task_type": "hermes_dev",
+                    "execution_mode": "builder_review",
+                    "experts": ["coordinator", "builder", "writer"],
+                    "risk_level": "medium",
+                    "requires_confirmation": False,
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    status = json.loads(plugin.handle_status({"recent_routes": 1}))
     assert status["plugins"] == {"lchd-personal-assistant": True}
     assert status["toolset"] == "lchd_personal"
+    assert [route["task"] for route in status["recent_expert_routes"]] == ["新任务"]
+    assert status["recent_expert_routes"][0]["risk_level"] == "medium"
 
     result = json.loads(plugin.handle_handoff_note({"title": "瘦身测试", "completed": ["ok"], "next_step": "done"}))
     path = Path(result["path"])
@@ -176,12 +208,43 @@ def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
     assert route["experts"][0] == "coordinator"
     assert "builder" in route["experts"]
     assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["verification"]
+    assert route["version"] == "0.3.0"
+    assert route["risk_level"] == "medium"
+    assert route["requires_confirmation"] is False
+    assert route["human_gate"]["required"] is False
     audit_path = Path(route["audit_path"])
     assert audit_path.exists()
-    assert json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])["task_type"] == "hermes_dev"
+    audit = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert audit["task_type"] == "hermes_dev"
+    assert audit["risk_level"] == "medium"
 
     route_only = json.loads(plugin.handle_task_route({"task": "v0.2 四专家路由最终验证"}))
     assert route_only["task_type"] == "hermes_dev"
+
+
+def test_task_route_marks_human_gate_for_high_risk_ops(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "重启 sing-box 服务并修改启动脚本"}))
+
+    assert route["ok"] is True
+    assert route["task_type"] == "ops"
+    assert route["risk_level"] == "high"
+    assert route["requires_confirmation"] is True
+    assert route["human_gate"]["required"] is True
+    assert route["human_gate"]["reason"]
+
+
+def test_task_route_does_not_escalate_negated_restart_language(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "v0.3 写代码验证，不重启服务"}))
+
+    assert route["ok"] is True
+    assert route["task_type"] == "hermes_dev"
+    assert route["risk_level"] == "medium"
+    assert route["requires_confirmation"] is False
+    assert route["human_gate"]["required"] is False
 
 
 def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
@@ -194,7 +257,11 @@ def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
     }))
 
     assert decision["ok"] is True
+    assert decision["version"] == "0.3.0"
     assert decision["recommendations"]["write_handoff"] is True
     assert decision["recommendations"]["update_wiki"] is True
     assert decision["recommendations"]["suggest_skill"] is True
+    assert decision["enforcement"]["must_review_before_final"] is True
+    assert "write_handoff" in decision["enforcement"]["recommended_actions"]
+    assert "do_not_save_task_progress_to_memory" in decision["enforcement"]["non_actions"]
     assert "plugins/lchd_personal_assistant/orchestrator.py" in decision["changed_files"]

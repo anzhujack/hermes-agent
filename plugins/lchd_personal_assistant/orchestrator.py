@@ -1,9 +1,10 @@
 """Lightweight four-expert task routing for Lchd's Hermes.
 
 This module turns the v0.1 static SOUL profile skeleton into a verifiable
-v0.2 routing layer. It remains deliberately small: no new core tools, no
-external agent framework, and no automatic side effects beyond an audit JSONL
-that lets future sessions prove routing happened.
+routing layer. It remains deliberately small: no new core tools, no external
+agent framework, and no automatic side effects beyond an audit JSONL that lets
+future sessions prove routing happened. v0.3 adds observable human gates and
+task-finalize enforcement hints before adding automatic delegation.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ except Exception:  # pragma: no cover
         return {}
 
 _ROLE_ORDER = ("coordinator", "researcher", "writer", "builder")
+_PLUGIN_VERSION = "0.3.0"
 _ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "coordinator": {
         "label": "项目经理",
@@ -160,7 +162,7 @@ def build_expert_registry(max_chars: int = 800) -> dict[str, Any]:
             experts[role]["error"] = error
     return {
         "ok": True,
-        "version": "0.2.0",
+        "version": _PLUGIN_VERSION,
         "profiles_dir": str(root),
         "experts": experts,
         "routing_note": "This reads SOUL.md content; it is no longer only a static existence check.",
@@ -210,6 +212,79 @@ def _classify_task(task: str, context: str = "") -> dict[str, Any]:
     }
 
 
+def _assess_human_gate(task: str, context: str, route: dict[str, Any]) -> dict[str, Any]:
+    text = f"{task}\n{context}".lower()
+    high_risk_terms = (
+        "重启",
+        "restart",
+        "停止服务",
+        "stop service",
+        "修改启动脚本",
+        "init script",
+        "公开发布",
+        "publish",
+        "上传",
+        "upload",
+        "merge",
+        "支付",
+        "付款",
+        "删除",
+        "清理",
+        "回滚",
+        "rollback",
+    )
+    medium_risk_terms = (
+        "写代码",
+        "实现",
+        "修复",
+        "配置",
+        "部署",
+        "改文件",
+        "edit",
+        "deploy",
+        "config",
+    )
+    negated_high_risk_phrases = (
+        "不重启",
+        "无需重启",
+        "不停止服务",
+        "不修改启动脚本",
+        "不公开发布",
+        "不发布",
+        "不上传",
+        "不删除",
+        "不清理",
+        "不回滚",
+        "no restart",
+        "without restart",
+        "do not restart",
+    )
+    risk_text = text
+    for phrase in negated_high_risk_phrases:
+        risk_text = risk_text.replace(phrase, "")
+    task_type = str(route.get("task_type") or "")
+    high = any(term in risk_text for term in high_risk_terms)
+    if task_type == "ops" and any(term in risk_text for term in ("重启", "restart", "停止服务", "stop service", "修改启动脚本", "init script")):
+        high = True
+    medium = task_type in {"hermes_dev", "ops"} or any(term in text for term in medium_risk_terms)
+    risk_level = "high" if high else "medium" if medium else "low"
+    required = risk_level == "high"
+    reason = "" if not required else "涉及服务变更、公开发布/上传、删除清理、回滚或支付等高风险动作，执行前需要 Lchd 明确确认。"
+    return {
+        "risk_level": risk_level,
+        "requires_confirmation": required,
+        "human_gate": {
+            "required": required,
+            "reason": reason,
+            "confirm_before": [
+                "服务重启、停止或启动脚本变更",
+                "公开发布、上传、合并或支付动作",
+                "不可逆删除、全量清理或回滚",
+            ],
+        },
+    }
+
+
 def _append_audit(record: dict[str, Any]) -> Path:
     path = _wiki_root() / "logs" / "expert_routes.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,6 +299,7 @@ def build_task_route(task: str, context: str = "") -> dict[str, Any]:
     if not task:
         return {"ok": False, "error": "missing_task"}
     route = _classify_task(task, context)
+    route = {**route, **_assess_human_gate(task, context, route)}
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "task": task[:500],
@@ -233,7 +309,7 @@ def build_task_route(task: str, context: str = "") -> dict[str, Any]:
     audit_path = _append_audit(record)
     return {
         "ok": True,
-        "version": "0.2.0",
+        "version": _PLUGIN_VERSION,
         "task": task,
         "audit_path": str(audit_path),
         "guardrails": [
@@ -259,13 +335,20 @@ def build_task_finalize(summary: str = "", files_changed: Any = None, verificati
         "suggest_memory": False,
         "suggest_skill": bool(reusable or touched_code),
     }
+    recommended_actions = [name for name, needed in recommendations.items() if needed]
     return {
         "ok": True,
-        "version": "0.2.0",
+        "version": _PLUGIN_VERSION,
         "summary": summary,
         "changed_files": changed_files,
         "verification": checks,
         "recommendations": recommendations,
+        "enforcement": {
+            "must_review_before_final": True,
+            "recommended_actions": recommended_actions,
+            "non_actions": ["do_not_save_task_progress_to_memory"],
+            "human_gate": "Ask before service restarts, public publishing/uploading, destructive cleanup, rollback, or payment actions.",
+        },
         "policy": {
             "memory": "Only compact durable preferences/environment facts; do not store task progress.",
             "wiki": "Dynamic project status, audit logs, handoffs.",

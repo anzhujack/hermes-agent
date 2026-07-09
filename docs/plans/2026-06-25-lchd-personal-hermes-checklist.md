@@ -60,11 +60,15 @@ Build Lchd's Hermes into a Chinese-first, cost-aware, self-improving private ass
    - Repo source: `plugins/lchd_personal_assistant/`.
    - Active runtime copy: `/root/.hermes/plugins/lchd_personal_assistant/`.
    - Unified toolset: `lchd_personal`.
-   - Tools retained: `lchd_context_profile`, `lchd_vault_lookup`, `lchd_runtime_snapshot`, `lchd_guardrails_check`, `lchd_model_policy`, `lchd_status`, `lchd_handoff_note`.
-2. **Knowledge workflow / maintenance jobs** — still active.
-   - Script: `/root/.hermes/scripts/lchd_wiki_promote.py`.
-   - Template: `/root/Documents/Obsidian Vault/Templates/Lchd任务结束复盘模板.md`.
-   - Weekly no-agent jobs: `lchd-provider-health-weekly`, `lchd-personal-hermes-status-weekly`.
+2. **v0.2 expert orchestrator** — implemented.
+   - Tools: `lchd_expert_registry`, `lchd_task_route`, `lchd_task_finalize`.
+   - Audit log: `/root/.hermes/wiki/logs/expert_routes.jsonl`.
+3. **v0.3 observability + human gate** — implemented.
+   - `lchd_status(recent_routes=N)` returns `recent_expert_routes`.
+   - `lchd_task_route` returns `risk_level`, `requires_confirmation`, `human_gate` and records them in audit JSONL.
+   - `lchd_task_finalize` returns `enforcement` hints for end-of-task persistence review.
+4. **Next candidate** — v0.4 expert-driven delegation.
+   - Do not add automatic fan-out until route conditions, context trimming, audit logging, and failure rollback are designed.
 
 ## First Implementation Slice
 

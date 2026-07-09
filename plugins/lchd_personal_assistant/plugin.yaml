@@ -1,5 +1,5 @@
 name: lchd-personal-assistant
-version: "0.2.0"
+version: "0.3.0"
 description: "Unified personal assistant tools for Lchd."
 author: "Lchd + Hermes Agent"
 hooks:

@@ -57,7 +57,38 @@ def _safe_slug(text: str) -> str:
     return text[:80] or "handoff"
 
 
-def build_status() -> dict[str, Any]:
+def _coerce_recent_routes_limit(value: Any) -> int:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = 5
+    return min(max(limit, 0), 20)
+
+
+def _recent_expert_routes(wiki: Path, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    path = wiki / "logs" / "expert_routes.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return []
+    routes: list[dict[str, Any]] = []
+    keep = ("ts", "task", "task_type", "execution_mode", "experts", "risk_level", "requires_confirmation")
+    for line in reversed(lines):
+        if len(routes) >= limit:
+            break
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        routes.append({key: record.get(key) for key in keep if key in record})
+    return routes
+
+
+def build_status(recent_routes: int = 5) -> dict[str, Any]:
     config = _load_config()
     personal = _lchd_config(config)
     enabled = _plugins_enabled(config)
@@ -68,6 +99,8 @@ def build_status() -> dict[str, Any]:
     model = config.get("model") or {}
     if not isinstance(model, dict):
         model = {}
+    wiki = _wiki_root(config)
+    recent_routes = _coerce_recent_routes_limit(recent_routes)
     return {
         "ok": True,
         "中文阶段摘要": {
@@ -80,20 +113,22 @@ def build_status() -> dict[str, Any]:
             "下一步": "Optional /restart then /new so gateway chat schema exposes v0.2 expert tools; then commit/cleanup.",
         },
         "paths": {
-            "wiki_root": str(_wiki_root(config)),
+            "wiki_root": str(wiki),
             "obsidian_vault_path": str(personal.get("obsidian_vault_path", "/root/Documents/Obsidian Vault")),
             "profiles_dir": str(personal.get("profiles_dir", get_hermes_home() / "lchd-profiles")),
-            "dashboard": str(_wiki_root(config) / "system" / "dashboard.md"),
+            "dashboard": str(wiki / "system" / "dashboard.md"),
         },
         "model": {"provider": model.get("provider"), "default": model.get("default") or model.get("model")},
         "plugins": plugin_state,
         "legacy_plugins": legacy_state,
         "toolset": "lchd_personal",
+        "recent_expert_routes": _recent_expert_routes(wiki, recent_routes),
     }
 
 
 def handle_status(args: dict | None = None, **_: Any) -> str:
-    return _json(build_status())
+    args = args or {}
+    return _json(build_status(recent_routes=_coerce_recent_routes_limit(args.get("recent_routes", 5))))
 
 
 def handle_handoff_note(args: dict | None = None, **_: Any) -> str:
@@ -141,7 +176,17 @@ def handle_handoff_note(args: dict | None = None, **_: Any) -> str:
 LCHD_STATUS_SCHEMA = {
     "name": "lchd_status",
     "description": "Return a Chinese phased status summary for Lchd's personalized Hermes project.",
-    "parameters": {"type": "object", "properties": {}},
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "recent_routes": {
+                "type": "integer",
+                "description": "Number of recent expert route audit entries to include. Default 5, capped at 20.",
+                "default": 5,
+            }
+        },
+        "additionalProperties": False,
+    },
 }
 
 LCHD_HANDOFF_NOTE_SCHEMA = {
