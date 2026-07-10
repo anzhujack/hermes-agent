@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from hermes_cli import web_server
 from hermes_cli.dashboard_auth import clear_providers, register_provider
 from hermes_cli.dashboard_auth.cookies import SESSION_AT_COOKIE
+from plugins.dashboard_auth.basic import BasicAuthProvider, hash_password
 from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
 
 
@@ -115,6 +116,26 @@ def test_gated_html_redirects_to_login(gated_app):
     # /auth/login rather than rendering the /login interstitial. The /login
     # page remains the fallback (multiple/zero providers, or loop-guard trip).
     assert r.headers["location"].startswith("/auth/login?provider=stub")
+
+
+def test_single_password_provider_redirects_to_password_login_page(gated_app):
+    """A password-only provider must render /login, not enter OAuth startup."""
+    clear_providers()
+    register_provider(
+        BasicAuthProvider(
+            username="test-user",
+            password_hash=hash_password("test-password"),
+            secret=b"test-signing-secret-at-least-16-bytes",
+        )
+    )
+
+    response = gated_app.get("/", follow_redirects=False)
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/login?next=%2F"
+    login = gated_app.get(response.headers["location"])
+    assert login.status_code == 200
+    assert 'data-provider="basic"' in login.text
 
 
 def test_gated_auth_providers_is_public(gated_app):
