@@ -32,6 +32,7 @@ from .orchestrator import (
     handle_expert_registry,
     handle_task_finalize,
     handle_task_route,
+    on_pre_llm_call,
 )
 from .routing import LCHD_MODEL_POLICY_SCHEMA, handle_model_policy
 from .ux import LCHD_HANDOFF_NOTE_SCHEMA, LCHD_STATUS_SCHEMA, handle_handoff_note, handle_status
@@ -42,6 +43,7 @@ _TOOLSET = "lchd_personal"
 def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("transform_tool_result", on_transform_tool_result)
+    ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_tool(
         name="lchd_context_profile",
         toolset=_TOOLSET,

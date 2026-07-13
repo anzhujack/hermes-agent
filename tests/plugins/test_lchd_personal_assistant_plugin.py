@@ -100,7 +100,22 @@ def test_unified_plugin_registers_all_tools_and_hooks():
         "lchd_task_finalize",
     ]
     assert {tool["toolset"] for tool in ctx.tools} == {"lchd_personal"}
-    assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result"]
+    assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result", "pre_llm_call"]
+    assert plugin.__file__ is not None
+    metadata = yaml.safe_load((Path(plugin.__file__).with_name("plugin.yaml")).read_text(encoding="utf-8"))
+    assert metadata["version"] == "0.5.0"
+    assert metadata["hooks"] == ["pre_tool_call", "transform_tool_result", "pre_llm_call"]
+
+
+def test_task_route_schema_discourages_routing_and_delegating_simple_tasks():
+    plugin = _load_package()
+
+    description = plugin.LCHD_TASK_ROUTE_SCHEMA["description"].lower()
+
+    assert "non-trivial" in description
+    assert "simple" in description
+    assert "recommended" in description
+    assert "dispatch_allowed" in description
 
 
 def test_context_vault_and_runtime_handlers_work():
@@ -161,6 +176,8 @@ def test_status_and_handoff_handlers_work(_isolated_lchd_home):
                     "ts": "2026-01-02T00:00:00+00:00",
                     "task": "新任务",
                     "task_type": "hermes_dev",
+                    "classification_source": "task",
+                    "complexity": "non_trivial",
                     "execution_mode": "builder_review",
                     "experts": ["coordinator", "builder", "writer"],
                     "risk_level": "medium",
@@ -183,12 +200,19 @@ def test_status_and_handoff_handlers_work(_isolated_lchd_home):
     assert status["toolset"] == "lchd_personal"
     assert [route["task"] for route in status["recent_expert_routes"]] == ["新任务"]
     assert status["recent_expert_routes"][0]["risk_level"] == "medium"
+    assert status["recent_expert_routes"][0]["classification_source"] == "task"
+    assert status["recent_expert_routes"][0]["complexity"] == "non_trivial"
     assert status["recent_expert_routes"][0]["delegation_summary"] == {
         "recommended": True,
         "mode": "builder_review",
         "dispatch_allowed": True,
         "task_count": 2,
     }
+    route_guidance = status["中文阶段摘要"]["下一步"]
+    assert "复杂任务" in route_guidance
+    assert "简单" in route_guidance
+    assert "delegation.recommended" in route_guidance
+    assert "dispatch_allowed" in route_guidance
 
     result = json.loads(plugin.handle_handoff_note({"title": "瘦身测试", "completed": ["ok"], "next_step": "done"}))
     path = Path(result["path"])
@@ -209,6 +233,271 @@ def test_expert_registry_reads_soul_profiles_without_being_status_only():
     assert "task_types" in registry["experts"]["researcher"]
 
 
+def test_task_route_keeps_generic_action_menu_general_when_context_only_mentions_hermes(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({
+        "task": "梳理当前最值得立即开展的事项，并给出可直接回复编号启动的行动菜单。",
+        "context": "用户泛问现在还能做什么；请基于当前 Hermes 个性化状态、近期项目与长期偏好回答。",
+    }))
+
+    assert route["ok"] is True
+    assert route["task_type"] == "general"
+    assert route["execution_mode"] == "guided_direct"
+    assert route["experts"] == ["coordinator", "writer"]
+    assert route["risk_level"] == "low"
+    assert route["delegation"]["recommended"] is False
+    assert route["delegation"]["dispatch_allowed"] is False
+    assert route["delegation"]["tasks"] == []
+
+
+def test_task_route_does_not_treat_hermes_domain_nouns_as_development(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "Hermes 现在有哪些能力？"}))
+
+    assert route["task_type"] == "general"
+    assert route["execution_mode"] == "guided_direct"
+    assert route["delegation"]["recommended"] is False
+
+
+def test_task_route_requires_hermes_domain_for_code_actions(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "写代码实现一个本地 CSV 去重脚本"}))
+
+    assert route["task_type"] == "general"
+    assert route["classification_source"] == "task"
+    assert route["delegation"]["recommended"] is False
+
+
+def test_task_route_keeps_simple_hermes_change_direct(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({
+        "task": "修复 Hermes 插件里的一个拼写错误",
+        "context": "这是 v0.5 系统性版本升级中的一个背景事项。",
+    }))
+
+    assert route["task_type"] == "hermes_dev"
+    assert route["classification_source"] == "task"
+    assert route["complexity"] == "simple"
+    assert route["experts"] == ["coordinator", "builder"]
+    assert route["delegation"]["mode"] == "none"
+    assert route["delegation"]["recommended"] is False
+    assert route["delegation"]["dispatch_allowed"] is False
+    assert route["delegation"]["tasks"] == []
+
+
+@pytest.mark.parametrize(
+    ("task", "context", "task_type", "complexity", "experts", "recommended"),
+    [
+        (
+            "查一下 Hermes 当前最新版本",
+            "",
+            "research",
+            "simple",
+            ["coordinator", "researcher"],
+            False,
+        ),
+        (
+            "联网调研并比较三种 Hermes 委派方案，要求多来源交叉核验",
+            "",
+            "research",
+            "non_trivial",
+            ["coordinator", "researcher", "writer"],
+            True,
+        ),
+        (
+            "把这句话润色一下",
+            "",
+            "writing",
+            "simple",
+            ["coordinator", "writer"],
+            False,
+        ),
+        (
+            "撰写一份完整的多章节项目报告，并统一结构和叙事",
+            "",
+            "writing",
+            "non_trivial",
+            ["coordinator", "writer"],
+            True,
+        ),
+        (
+            "检查 sing-box 服务状态",
+            "",
+            "ops",
+            "simple",
+            ["coordinator", "builder"],
+            False,
+        ),
+        (
+            "系统性诊断 sing-box DNS 故障，检查日志和配置，不重启服务",
+            "",
+            "ops",
+            "non_trivial",
+            ["coordinator", "builder", "researcher"],
+            True,
+        ),
+        (
+            "推进 Personal Hermes v0.5，优化任务分类与自动委派并补齐回归测试",
+            "",
+            "hermes_dev",
+            "non_trivial",
+            ["coordinator", "builder", "writer"],
+            True,
+        ),
+    ],
+)
+def test_task_route_classification_and_delegation_matrix(
+    _isolated_lchd_home,
+    task,
+    context,
+    task_type,
+    complexity,
+    experts,
+    recommended,
+):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": task, "context": context}))
+
+    assert route["task_type"] == task_type
+    assert route["complexity"] == complexity
+    assert route["experts"] == experts
+    assert route["delegation"]["recommended"] is recommended
+    assert route["delegation"]["dispatch_allowed"] is recommended
+
+
+def test_task_route_uses_context_only_for_referential_tasks(_isolated_lchd_home):
+    plugin = _load_package()
+    context = "当前正在优化 Hermes 插件路由并跑回归测试。"
+
+    referential = json.loads(plugin.handle_task_route({"task": "继续处理这个", "context": context}))
+    terse = json.loads(plugin.handle_task_route({"task": "继续", "context": context}))
+    standalone = json.loads(plugin.handle_task_route({"task": "给我列一个行动菜单", "context": context}))
+
+    assert referential["task_type"] == "hermes_dev"
+    assert referential["classification_source"] == "context"
+    assert referential["complexity"] == "non_trivial"
+    assert referential["delegation"]["recommended"] is True
+    assert terse["task_type"] == "hermes_dev"
+    assert terse["classification_source"] == "context"
+    assert terse["delegation"]["recommended"] is True
+    assert standalone["task_type"] == "general"
+    assert standalone["classification_source"] == "task"
+    assert standalone["complexity"] == "simple"
+    assert standalone["delegation"]["recommended"] is False
+
+
+def test_task_route_requires_ops_action_not_just_domain_noun(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": "sing-box 是什么？"}))
+    intro = json.loads(plugin.handle_task_route({"task": "请写一段 Hermes 功能介绍"}))
+    implementation = json.loads(plugin.handle_task_route({
+        "task": "联网查官方文档后修复 Hermes 插件路由并跑回归测试",
+    }))
+
+    assert route["task_type"] == "general"
+    assert route["delegation"]["recommended"] is False
+    assert intro["task_type"] == "writing"
+    assert intro["delegation"]["recommended"] is False
+    assert implementation["task_type"] == "hermes_dev"
+    assert implementation["complexity"] == "non_trivial"
+    assert implementation["delegation"]["recommended"] is True
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "不用联网，直接解释 Hermes 是什么",
+        "不要改代码，只介绍 Hermes 插件能力",
+        "无需修改 Hermes，给我一个行动菜单",
+    ],
+)
+def test_negated_actions_do_not_promote_generic_tasks(_isolated_lchd_home, task):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({"task": task}))
+
+    assert route["task_type"] == "general"
+    assert route["classification_source"] == "task"
+    assert route["complexity"] == "simple"
+    assert route["delegation"]["recommended"] is False
+
+
+def test_background_context_does_not_trigger_human_gate(_isolated_lchd_home):
+    plugin = _load_package()
+
+    route = json.loads(plugin.handle_task_route({
+        "task": "检查 sing-box 服务状态",
+        "context": "历史记录：昨天曾重启 sing-box 服务，今天只需读取状态。",
+    }))
+    referential = json.loads(plugin.handle_task_route({
+        "task": "继续执行刚才那一步",
+        "context": "当前待执行动作是重启 sing-box 服务。",
+    }))
+
+    assert route["task_type"] == "ops"
+    assert route["risk_level"] == "medium"
+    assert route["human_gate"]["required"] is False
+    assert referential["task_type"] == "ops"
+    assert referential["classification_source"] == "context"
+    assert referential["risk_level"] == "high"
+    assert referential["human_gate"]["required"] is True
+    assert referential["delegation"]["dispatch_allowed"] is False
+
+
+def test_pre_llm_routing_hint_hardens_parent_agent_habit():
+    plugin = _load_package()
+
+    direct = plugin.on_pre_llm_call(
+        user_message="Hermes 现在有哪些能力？",
+        conversation_history=[],
+        platform="discord",
+    )
+    routed = plugin.on_pre_llm_call(
+        user_message="推进 Personal Hermes v0.5，优化任务分类与自动委派并补齐回归测试",
+        conversation_history=[],
+        platform="discord",
+    )
+    continuation = plugin.on_pre_llm_call(
+        user_message="继续",
+        conversation_history=[{"role": "user", "content": "优化 Hermes 插件路由"}],
+        platform="discord",
+    )
+
+    assert "handling=direct" in direct["context"]
+    assert "task_type=general" in direct["context"]
+    assert "do not call delegate_task" in direct["context"].lower()
+    assert "handling=route_first" in routed["context"]
+    assert "task_type=hermes_dev" in routed["context"]
+    assert "delegation.recommended=true" in routed["context"]
+    assert "dispatch_allowed=true" in routed["context"]
+    assert "task_type=continuation" in continuation["context"]
+    assert "classification_source=conversation_history" in continuation["context"]
+    assert "conversation_history=available" in continuation["context"]
+    assert "call lchd_task_route once" in continuation["context"]
+    assert plugin.on_pre_llm_call(user_message="anything", platform="subagent") is None
+
+
+def test_pre_llm_direct_hint_preserves_high_risk_human_gate():
+    plugin = _load_package()
+
+    result = plugin.on_pre_llm_call(
+        user_message="重启 sing-box 服务",
+        conversation_history=[],
+        platform="discord",
+    )
+
+    assert "handling=direct" in result["context"]
+    assert "human_gate.required=true" in result["context"]
+    assert "explicit confirmation" in result["context"].lower()
+    assert "do not call delegate_task" in result["context"].lower()
+
+
 def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
     plugin = _load_package()
 
@@ -220,7 +509,7 @@ def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
     assert route["experts"][0] == "coordinator"
     assert "builder" in route["experts"]
     assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["verification"]
-    assert route["version"] == "0.4.0"
+    assert route["version"] == "0.5.0"
     assert route["risk_level"] == "medium"
     assert route["requires_confirmation"] is False
     assert route["human_gate"]["required"] is False
@@ -266,7 +555,7 @@ def test_task_route_builds_parallel_research_delegation_plan(_isolated_lchd_home
     route = json.loads(plugin.handle_task_route({"task": "联网搜索 Hermes delegate_task 和多智能体 human-in-the-loop 方案，给我 v0.4 方案"}))
 
     assert route["ok"] is True
-    assert route["version"] == "0.4.0"
+    assert route["version"] == "0.5.0"
     assert route["task_type"] == "research"
     assert route["delegation"]["recommended"] is True
     assert route["delegation"]["mode"] == "parallel_research"
@@ -315,7 +604,7 @@ def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
     }))
 
     assert decision["ok"] is True
-    assert decision["version"] == "0.4.0"
+    assert decision["version"] == "0.5.0"
     assert decision["recommendations"]["write_handoff"] is True
     assert decision["recommendations"]["update_wiki"] is True
     assert decision["recommendations"]["suggest_skill"] is True

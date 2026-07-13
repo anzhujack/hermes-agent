@@ -3,8 +3,8 @@
 This module turns the v0.1 static SOUL profile skeleton into a verifiable
 routing layer. It remains deliberately small: no new core tools, no external
 agent framework, and no automatic side effects beyond an audit JSONL that lets
-future sessions prove routing happened. v0.4 adds a guarded delegation planner
-that tells the parent agent when subagent fan-out is useful without spawning it.
+future sessions prove routing happened. v0.5 hardens parent-agent routing habits,
+task/context precedence, complexity gating, and guarded delegation decisions.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
         return {}
 
 _ROLE_ORDER = ("coordinator", "researcher", "writer", "builder")
-_PLUGIN_VERSION = "0.4.0"
+_PLUGIN_VERSION = "0.5.0"
 _ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "coordinator": {
         "label": "项目经理",
@@ -70,7 +70,11 @@ LCHD_EXPERT_REGISTRY_SCHEMA = {
 
 LCHD_TASK_ROUTE_SCHEMA = {
     "name": "lchd_task_route",
-    "description": "Route a user task to Lchd's coordinator/researcher/writer/builder profiles and record an audit entry.",
+    "description": (
+        "Route a non-trivial user task to Lchd's specialist profiles and record an audit entry. "
+        "Handle simple conversational or single-step tasks directly. After routing, delegate only when "
+        "delegation.recommended and delegation.dispatch_allowed are both true; the parent must verify child summaries."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
@@ -169,17 +173,45 @@ def build_expert_registry(max_chars: int = 800) -> dict[str, Any]:
     }
 
 
-def _classify_task(task: str, context: str = "") -> dict[str, Any]:
-    text = f"{task}\n{context}".lower()
-    if any(term in text for term in ("联网", "调研", "搜索", "research", "比较", "资料", "来源", "web", "human-in-the-loop", "多智能体")):
-        return {
-            "task_type": "research",
-            "execution_mode": "parallel_research",
-            "experts": ["coordinator", "researcher", "writer"],
-            "knowledge_sources": ["web", "session_search", "obsidian"],
-            "verification": ["cite authoritative sources", "cross-check claims"],
-        }
-    if any(term in text for term in ("hermes", "插件", "plugin", "代码", "test", "pytest", "实现", "修复", "debug", "gateway", "配置", "v0.2", "v0.3", "v0.4", "路由", "orchestrator", "专家", "delegation")):
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _without_negated_intents(text: str) -> str:
+    """Remove explicit non-goals so a denied action cannot become routing evidence."""
+    normalized = text.lower()
+    negated_phrases = (
+        "不用联网", "无需联网", "不需要联网", "不要联网", "不必联网",
+        "不要改代码", "无需改代码", "不用改代码", "不需要改代码", "不必改代码",
+        "不要写代码", "无需写代码", "不用写代码", "不需要写代码", "不必写代码",
+        "不要修改", "无需修改", "不用修改", "不需要修改", "不必修改",
+        "不要实现", "无需实现", "不用实现", "不需要实现", "不必实现",
+    )
+    for phrase in negated_phrases:
+        normalized = normalized.replace(phrase, "")
+    return normalized
+
+
+def _classify_text(text: str) -> dict[str, Any]:
+    """Classify only explicit intent; domain nouns alone must not promote a task."""
+    text = _without_negated_intents(text).strip()
+    research_action = _contains_any(text, (
+        "联网", "调研", "搜索", "检索", "查找", "查一下", "查询", "查证", "核验",
+        "research", "web search", "fact-check", "fact check",
+    ))
+
+    dev_domain = _contains_any(text, (
+        "hermes", "lchd personal", "personal hermes", "插件", "plugin", "gateway",
+        "orchestrator", "delegation", "delegate_task", "v0.",
+    ))
+    dev_action = _contains_any(text, (
+        "实现", "修复", "debug", "调试", "开发", "修改", "改造", "优化", "推进",
+        "部署", "升级", "验证", "重构", "补齐测试", "跑测试", "pytest",
+    ))
+    explicit_code_action = _contains_any(text, (
+        "写代码", "改代码", "实现代码", "修复代码", "代码审查", "单元测试", "回归测试",
+    ))
+    if dev_domain and (dev_action or explicit_code_action):
         return {
             "task_type": "hermes_dev",
             "execution_mode": "builder_review",
@@ -187,7 +219,21 @@ def _classify_task(task: str, context: str = "") -> dict[str, Any]:
             "knowledge_sources": ["repo", "config", "session_search", "wiki"],
             "verification": ["scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py"],
         }
-    if any(term in text for term in ("小说", "正文", "大纲", "文案", "总结", "报告", "写", "润色")):
+
+    if research_action:
+        return {
+            "task_type": "research",
+            "execution_mode": "parallel_research",
+            "experts": ["coordinator", "researcher", "writer"],
+            "knowledge_sources": ["web", "session_search", "obsidian"],
+            "verification": ["cite authoritative sources", "cross-check claims"],
+        }
+
+    writing_action = _contains_any(text, (
+        "写一段", "写一份", "写篇", "撰写", "润色", "改写", "续写", "总结",
+        "生成文案", "整理成报告", "写报告", "写大纲", "写正文", "创作", "起草",
+    ))
+    if writing_action:
         return {
             "task_type": "writing",
             "execution_mode": "writer_synthesis",
@@ -195,7 +241,16 @@ def _classify_task(task: str, context: str = "") -> dict[str, Any]:
             "knowledge_sources": ["obsidian", "wiki", "project files"],
             "verification": ["check style and continuity"],
         }
-    if any(term in text for term in ("路由器", "sing-box", "dns", "docker", "端口", "服务", "cron", "健康")):
+
+    ops_domain = _contains_any(text, (
+        "路由器", "sing-box", "singbox", "momo", "dns", "docker", "端口", "服务",
+        "cron", "ext4", "磁盘", "网关进程",
+    ))
+    ops_action = _contains_any(text, (
+        "检查", "查看", "诊断", "排障", "修复", "重启", "停止", "启动", "配置",
+        "部署", "健康检查", "状态", "日志", "回滚", "清理",
+    ))
+    if ops_domain and ops_action:
         return {
             "task_type": "ops",
             "execution_mode": "guarded_builder",
@@ -203,6 +258,7 @@ def _classify_task(task: str, context: str = "") -> dict[str, Any]:
             "knowledge_sources": ["vault ops notes", "live system state", "logs"],
             "verification": ["non-destructive checks first", "no service restart without explicit approval"],
         }
+
     return {
         "task_type": "general",
         "execution_mode": "guided_direct",
@@ -212,8 +268,97 @@ def _classify_task(task: str, context: str = "") -> dict[str, Any]:
     }
 
 
+def _is_referential_task(task: str) -> bool:
+    """Return true only for short follow-ups whose intent genuinely lives in context."""
+    text = task.lower().strip()
+    if len(text) > 48:
+        return False
+    if text in {"继续", "接着", "然后呢", "下一步", "继续吧", "接着做吧"}:
+        return True
+    return _contains_any(text, (
+        "继续处理", "继续执行", "接着处理", "接着做", "刚才那", "上一步", "下一步",
+        "这个任务", "那个任务", "照之前", "按之前", "同上", "继续这个", "继续那个",
+    ))
+
+
+def _apply_task_complexity(
+    task: str,
+    context: str,
+    route: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    """Gate delegation using only the active request, never unrelated background context."""
+    text = (context if source == "context" else task).lower()
+    task_type = str(route.get("task_type") or "general")
+    explicit_simple = _contains_any(text, (
+        "拼写错误", "错别字", "typo", "一句话", "这句话", "一段", "一个字段",
+        "单个字段", "只改一处", "只回复", "简单检查", "查看状态", "检查状态",
+    ))
+    common_complex = _contains_any(text, (
+        "v0.", "版本升级", "架构", "重构", "多文件", "多步骤", "端到端", "批量",
+        "系统性", "完整实现", "完整审查", "多章节", "多来源", "交叉核验", "多智能体",
+    ))
+
+    if task_type == "general":
+        complexity = "simple"
+        reason = "General conversational guidance is handled directly."
+    elif explicit_simple and not common_complex:
+        complexity = "simple"
+        reason = "The active request is explicitly narrow and does not benefit from subagent overhead."
+    elif task_type == "research":
+        research_complex = common_complex or _contains_any(text, (
+            "调研", "深度", "全面", "方案", "三种", "多个", "比较", "对比", "来源",
+        ))
+        complexity = "non_trivial" if research_complex else "simple"
+        reason = "Multi-source research benefits from isolated workstreams." if research_complex else "A single lookup is cheaper to handle directly."
+    elif task_type == "writing":
+        writing_complex = common_complex or _contains_any(text, (
+            "完整", "长篇", "章节", "大纲", "正文", "统一结构", "整份", "系统报告",
+        ))
+        complexity = "non_trivial" if writing_complex else "simple"
+        reason = "Long-form synthesis benefits from a writer workstream." if writing_complex else "Short-form writing is handled directly."
+    elif task_type == "ops":
+        ops_complex = common_complex or _contains_any(text, (
+            "诊断", "排障", "故障", "启动脚本", "多项", "日志和配置", "根因",
+        ))
+        complexity = "non_trivial" if ops_complex else "simple"
+        reason = "Multi-step diagnosis benefits from a guarded specialist." if ops_complex else "A narrow read-only check is handled directly."
+    else:
+        complexity = "non_trivial"
+        reason = "Implementation work benefits from builder execution and parent verification."
+
+    experts = list(route.get("experts") or [])
+    if complexity == "simple":
+        if task_type == "research":
+            experts = ["coordinator", "researcher"]
+        elif task_type in {"hermes_dev", "ops"}:
+            experts = ["coordinator", "builder"]
+    return {
+        **route,
+        "classification_source": source,
+        "complexity": complexity,
+        "complexity_reason": reason,
+        "experts": experts,
+    }
+
+
+def _classify_task(task: str, context: str = "") -> dict[str, Any]:
+    primary = _classify_text(task)
+    source = "task"
+    selected = primary
+    if primary["task_type"] == "general" and context.strip() and _is_referential_task(task):
+        contextual = _classify_text(context)
+        if contextual["task_type"] != "general":
+            selected = contextual
+            source = "context"
+    return _apply_task_complexity(task, context, selected, source=source)
+
+
 def _assess_human_gate(task: str, context: str, route: dict[str, Any]) -> dict[str, Any]:
-    text = f"{task}\n{context}".lower()
+    source = str(route.get("classification_source") or "task")
+    active_text = f"{context}\n{task}" if source == "context" else task
+    text = active_text.lower()
     high_risk_terms = (
         "重启",
         "restart",
@@ -394,6 +539,7 @@ def _build_delegation_plan(task: str, context: str, route: dict[str, Any]) -> di
     plan = _base_delegation_plan(route)
     blocked = bool(route.get("human_gate", {}).get("required"))
     task_type = str(route.get("task_type") or "")
+    complexity = str(route.get("complexity") or "non_trivial")
     verification = list(route.get("verification") or [])
     common_forbidden = [
         "write persistent memory",
@@ -401,6 +547,12 @@ def _build_delegation_plan(task: str, context: str, route: dict[str, Any]) -> di
         "modify files outside the explicit allowed scope",
         "invent facts or cite sources not actually inspected",
     ]
+    if complexity == "simple":
+        return {
+            **plan,
+            "reason": "Simple or conversational tasks should be handled directly without subagent overhead.",
+            "parent_verification": verification,
+        }
     if task_type == "research":
         plan.update({
             "mode": "parallel_research",
@@ -536,6 +688,71 @@ def _append_audit(record: dict[str, Any]) -> Path:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return path
+
+
+def _routing_habit_context(task: str) -> str:
+    """Build ephemeral parent-agent guidance without writing a route audit record."""
+    route = _classify_task(task)
+    route = {**route, **_assess_human_gate(task, "", route)}
+    delegation = _build_delegation_plan(task, "", route)
+    task_type = str(route.get("task_type") or "general")
+    complexity = str(route.get("complexity") or "simple")
+    experts = ",".join(str(item) for item in route.get("experts") or [])
+    if complexity == "simple":
+        gate_required = str(bool(route.get("human_gate", {}).get("required"))).lower()
+        confirmation = (
+            " Human gate is required: obtain Lchd's explicit confirmation before the requested high-risk action."
+            if gate_required == "true"
+            else ""
+        )
+        return (
+            "[Lchd Personal Hermes routing hint]\n"
+            f"task_type={task_type}; classification_source=task; complexity={complexity}; "
+            f"experts={experts}; handling=direct; human_gate.required={gate_required}.\n"
+            "Handle this request directly. Do not call delegate_task, and do not promote it to Hermes "
+            f"development merely because it mentions Hermes or another domain noun.{confirmation}"
+        )
+    recommended = str(bool(delegation.get("recommended"))).lower()
+    dispatch_allowed = str(bool(delegation.get("dispatch_allowed"))).lower()
+    gate_required = str(bool(route.get("human_gate", {}).get("required"))).lower()
+    return (
+        "[Lchd Personal Hermes routing hint]\n"
+        f"task_type={task_type}; classification_source=task; complexity={complexity}; "
+        f"experts={experts}; handling=route_first; human_gate.required={gate_required}; "
+        f"delegation.recommended={recommended}; dispatch_allowed={dispatch_allowed}.\n"
+        "Call lchd_task_route once before substantive work so the decision is audited. If its returned "
+        "delegation.recommended=true and dispatch_allowed=true, dispatch the planned tasks with "
+        "delegate_task; then independently verify child summaries before the final answer. Never let "
+        "delegation bypass a required human gate."
+    )
+
+
+def on_pre_llm_call(
+    user_message: str = "",
+    platform: str = "",
+    conversation_history: Any = None,
+    **_: Any,
+) -> dict[str, str] | None:
+    """Harden route-first behavior for parent agents while keeping simple turns cheap."""
+    if str(platform or "").lower() == "subagent":
+        return None
+    task = str(user_message or "").strip()
+    if not task:
+        return None
+    if _is_referential_task(task):
+        history_state = "available" if isinstance(conversation_history, list) and conversation_history else "unavailable"
+        return {
+            "context": (
+                "[Lchd Personal Hermes routing hint]\n"
+                f"task_type=continuation; classification_source=conversation_history; complexity=unknown; "
+                f"handling=route_first; conversation_history={history_state}.\n"
+                "This is a referential follow-up. Build a concise, non-secret context summary from the relevant "
+                "conversation history, then call lchd_task_route once with the original user task plus that context. "
+                "Delegate only if the returned delegation.recommended=true and dispatch_allowed=true; independently "
+                "verify child summaries and never bypass human_gate.required=true."
+            )
+        }
+    return {"context": _routing_habit_context(task)}
 
 
 def build_task_route(task: str, context: str = "") -> dict[str, Any]:

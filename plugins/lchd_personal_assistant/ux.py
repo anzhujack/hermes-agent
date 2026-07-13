@@ -74,7 +74,10 @@ def _recent_expert_routes(wiki: Path, limit: int) -> list[dict[str, Any]]:
     except FileNotFoundError:
         return []
     routes: list[dict[str, Any]] = []
-    keep = ("ts", "task", "task_type", "execution_mode", "experts", "risk_level", "requires_confirmation", "delegation_summary")
+    keep = (
+        "ts", "task", "task_type", "classification_source", "complexity",
+        "execution_mode", "experts", "risk_level", "requires_confirmation", "delegation_summary",
+    )
     for line in reversed(lines):
         if len(routes) >= limit:
             break
@@ -113,13 +116,20 @@ def build_status(recent_routes: int = 5) -> dict[str, Any]:
     return {
         "ok": True,
         "中文阶段摘要": {
-            "已完成": [name for name, ok in plugin_state.items() if ok] + ["Wiki/Obsidian/Profile skeleton", "v0.4 expert delegation planner"],
+            "已完成": [name for name, ok in plugin_state.items() if ok] + [
+                "Wiki/Obsidian/Profile skeleton",
+                "v0.5 intent-aware routing and guarded parent-agent delegation",
+            ],
             "未完成": [name for name, ok in plugin_state.items() if not ok],
             "验证建议": [
                 "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py",
                 "cd /root/Documents/Obsidian Vault && python3 scripts/kb-lint.py --links --secrets",
             ],
-            "下一步": "Use lchd_task_route first; if delegation.recommended and dispatch_allowed, parent agent may call delegate_task and must verify child summaries.",
+            "下一步": (
+                "复杂任务先调用 lchd_task_route；简单对话或单步任务直接处理。仅当 "
+                "delegation.recommended=true 且 dispatch_allowed=true 时，父 agent 才调用 "
+                "delegate_task，并独立验证子 agent 摘要。"
+            ),
         },
         "paths": {
             "wiki_root": str(wiki),
