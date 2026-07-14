@@ -13,6 +13,16 @@ from agent.context_compressor import (
 from hermes_state import SessionDB
 
 
+@pytest.fixture(autouse=True)
+def block_live_summary_provider(monkeypatch):
+    """Keep compressor tests hermetic unless a test installs its own response."""
+
+    def _blocked_call(*_args, **_kwargs):
+        raise RuntimeError("live summary providers are disabled in tests")
+
+    monkeypatch.setattr("agent.context_compressor.call_llm", _blocked_call)
+
+
 @pytest.fixture()
 def compressor():
     """Create a ContextCompressor with mocked dependencies."""

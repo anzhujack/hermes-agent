@@ -277,3 +277,28 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     # Discovery found the probe file (2 tests), proving the positional path
     # was consumed as a root, not forwarded to pytest as a bad flag.
     assert "test_flagprobe.py" in proc.stdout, proc.stdout
+
+
+def test_shell_runner_preserves_prebuilt_docker_image_env(tmp_path: Path) -> None:
+    """The hermetic wrapper must not discard the Docker CI image override."""
+    repo_root = Path(__file__).resolve().parent.parent
+    wrapper = repo_root / "scripts" / "run_tests.sh"
+    probe = tmp_path / "test_docker_image_env.py"
+    probe.write_text(
+        "import os\n\n"
+        "def test_docker_image_env():\n"
+        "    assert os.environ.get('HERMES_TEST_IMAGE') == 'prebuilt:test'\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["HERMES_TEST_IMAGE"] = "prebuilt:test"
+    proc = subprocess.run(
+        [str(wrapper), str(probe), "-j", "1", "--file-timeout", "30", "-q"],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stdout

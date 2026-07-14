@@ -5,6 +5,7 @@ heavy dependency chain.  It is safe to import at module level without triggering
 tool registration or provider resolution.
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -311,7 +312,8 @@ def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
 # ── Disabled skills ───────────────────────────────────────────────────────
 
 
-_RAW_CONFIG_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+_ConfigCacheKey = Tuple[str, bytes]
+_RAW_CONFIG_CACHE: Dict[_ConfigCacheKey, Dict[str, Any]] = {}
 
 
 def _raw_config_cache_clear() -> None:
@@ -319,39 +321,47 @@ def _raw_config_cache_clear() -> None:
     _RAW_CONFIG_CACHE.clear()
 
 
-def _load_raw_config() -> Dict[str, Any]:
-    """Read config.yaml with a shared mtime+size keyed cache.
+def _load_raw_config_snapshot() -> Tuple[Dict[str, Any], Optional[_ConfigCacheKey]]:
+    """Read config.yaml and return parsed data plus a content cache key.
 
     This module intentionally avoids importing ``hermes_cli.config`` on the
-    skill prompt/build path. A tiny local cache gives the same repeated-read
-    win without pulling the heavier CLI config stack into startup.
+    skill prompt/build path. A compact BLAKE2 fingerprint detects same-size
+    rewrites even on filesystems whose timestamp resolution is too coarse for
+    mtime/ctime keyed invalidation, while still avoiding repeated YAML parses.
     """
     config_path = get_config_path()
     if not config_path.exists():
-        return {}
+        return {}, None
     try:
-        stat = config_path.stat()
-        cache_key = (str(config_path), stat.st_mtime_ns, stat.st_size)
-    except OSError:
-        cache_key = None
+        raw = config_path.read_bytes()
+    except OSError as e:
+        logger.debug("Could not read skill config %s: %s", config_path, e)
+        return {}, None
 
-    if cache_key is not None:
-        cached = _RAW_CONFIG_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+    cache_key: _ConfigCacheKey = (
+        str(config_path),
+        hashlib.blake2b(raw, digest_size=16).digest(),
+    )
+    cached = _RAW_CONFIG_CACHE.get(cache_key)
+    if cached is not None:
+        return cached, cache_key
 
     try:
-        parsed = yaml_load(config_path.read_text(encoding="utf-8"))
+        parsed = yaml_load(raw.decode("utf-8"))
     except Exception as e:
         logger.debug("Could not read skill config %s: %s", config_path, e)
-        return {}
+        return {}, cache_key
     if not isinstance(parsed, dict):
-        return {}
+        return {}, cache_key
 
-    if cache_key is not None:
-        _RAW_CONFIG_CACHE.clear()
-        _RAW_CONFIG_CACHE[cache_key] = parsed
-    return parsed
+    _RAW_CONFIG_CACHE.clear()
+    _RAW_CONFIG_CACHE[cache_key] = parsed
+    return parsed, cache_key
+
+
+def _load_raw_config() -> Dict[str, Any]:
+    """Read config.yaml with a shared content-fingerprint cache."""
+    return _load_raw_config_snapshot()[0]
 
 
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
@@ -402,13 +412,10 @@ def _normalize_string_set(values) -> Set[str]:
 
 # ── External skills directories ──────────────────────────────────────────
 
-# (config_path_str, mtime_ns) -> resolved external dirs list.  Keyed by
-# mtime_ns so a config.yaml edit mid-run is picked up automatically;
-# otherwise every call would re-read + re-YAML-parse the 15KB config,
-# which becomes the dominant cost of ``hermes`` startup when ~120 skills
-# each trigger a category lookup during banner construction (10+ seconds
-# of pure waste).
-_EXTERNAL_DIRS_CACHE: Dict[Tuple[str, int], List[Path]] = {}
+# Content-fingerprint key -> resolved external dirs list. The shared raw
+# config cache still avoids repeated YAML parsing when ~120 skills trigger a
+# category lookup during banner construction.
+_EXTERNAL_DIRS_CACHE: Dict[_ConfigCacheKey, List[Path]] = {}
 
 
 def _external_dirs_cache_clear() -> None:
@@ -424,32 +431,20 @@ def get_external_skills_dirs() -> List[Path]:
     path.  Only directories that actually exist are returned.  Duplicates and
     paths that resolve to the local ``~/.hermes/skills/`` are silently skipped.
 
-    Cached in-process, keyed on ``config.yaml`` mtime — the function is
+    Cached in-process, keyed on a ``config.yaml`` content fingerprint — the function is
     called once per skill during banner / tool-registry scans, and YAML
     parsing a non-trivial config dominates ``hermes`` cold-start time
     when the cache is absent.
     """
-    config_path = get_config_path()
-    if not config_path.exists():
+    parsed, cache_key = _load_raw_config_snapshot()
+    if not parsed:
         return []
-
-    # Cache key: (absolute path, mtime_ns).  stat() is ~2us vs ~85ms for
-    # the full YAML parse, so the fast path is nearly free.
-    try:
-        stat = config_path.stat()
-        cache_key: Tuple[str, int] = (str(config_path), stat.st_mtime_ns)
-    except OSError:
-        cache_key = None  # type: ignore[assignment]
 
     if cache_key is not None:
         cached = _EXTERNAL_DIRS_CACHE.get(cache_key)
         if cached is not None:
             # Return a copy so callers can't mutate the cached list.
             return list(cached)
-
-    parsed = _load_raw_config()
-    if not parsed:
-        return []
 
     skills_cfg = parsed.get("skills")
     if not isinstance(skills_cfg, dict):

@@ -7,6 +7,17 @@ FROM ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie@sha256:b3c543b6c4f23a5f2df228
 # our Debian 13 (trixie, glibc 2.41) runtime.  Bumping to a new Node major
 # is a one-line ARG change; see #4977.
 FROM node:22-bookworm-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732 AS node_source
+
+# Prepare source permissions in an isolated stage. Dockerfile COPY --chmod
+# accepts octal modes only, while we need symbolic `X` semantics so directories
+# and existing executables stay traversable/executable without making every
+# source file executable. Walking this source-only stage also avoids the old
+# 30k-file chmod pass over the final image's .venv + node_modules (#49113).
+FROM node_source AS source_permissions
+WORKDIR /source
+COPY --link . .
+RUN chmod -R a+rX,go-w .
+
 FROM debian:13.4
 
 # Disable Python stdout buffering to ensure logs are printed immediately.
@@ -193,13 +204,12 @@ RUN cd web && npm run build && \
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
-# --link decouples this layer from parents for cache purposes; --chmod bakes
-# the final read-only permissions at copy time so we skip the separate
-# `chmod -R` pass that previously walked ~30k files across the venv +
-# node_modules + source (21s amd64 / 222s arm64 — #49113).  `a+rX,go-w`
-# gives the non-root hermes user read + traverse but no write; root retains
-# write so the build steps below don't need chmod u+w dances.
-COPY --link --chmod=a+rX,go-w . .
+# --link decouples this layer from parents for cache purposes. Permissions were
+# prepared in the source-only stage above, so this copy preserves `a+rX,go-w`
+# without walking the final image's .venv + node_modules + source (21s amd64 /
+# 222s arm64 — #49113). The non-root hermes user gets read + traverse but no
+# write; root retains write for the build steps below.
+COPY --link --from=source_permissions /source/ .
 
 # ---------- Permissions ----------
 # Link hermes-agent itself (editable). Deps are already installed in the
@@ -209,7 +219,7 @@ RUN uv pip install --no-cache-dir --no-deps -e "."
 
 # Wire the exec shim and install-method stamp.  Files under /opt/hermes are
 # already root-owned (COPY, uv sync, npm install all run as root) and
-# read-only for the hermes user (go-w from the --chmod above).
+# read-only for the hermes user (go-w from the source_permissions stage).
 
 USER root
 RUN mkdir -p /opt/hermes/bin && \

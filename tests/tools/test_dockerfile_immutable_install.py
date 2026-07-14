@@ -15,10 +15,14 @@ def _dockerfile_text() -> str:
 def test_dockerfile_makes_opt_hermes_readonly_for_hermes_user() -> None:
     text = _dockerfile_text()
 
-    # --chmod on the source COPY bakes read-only perms at copy time instead
-    # of a separate chmod -R pass (which walked ~30k files — #49113).
-    assert "COPY --link --chmod=a+rX,go-w . ." in text
-    # The old tree-walking passes must not be present.
+    # COPY --chmod accepts octal only, so prepare symbolic `X` permissions in a
+    # source-only stage, then preserve them into the final image. This avoids
+    # walking the final .venv + node_modules tree (~30k files — #49113).
+    assert "FROM node_source AS source_permissions" in text
+    assert "RUN chmod -R a+rX,go-w ." in text
+    assert "COPY --link --from=source_permissions /source/ ." in text
+    assert "--chmod=a+rX,go-w" not in text
+    # The old final-tree walking passes must not be present.
     assert "chown -R root:root /opt/hermes" not in text
     assert "chmod -R a+rX /opt/hermes" not in text
     assert "chmod -R a-w /opt/hermes" not in text
@@ -63,7 +67,7 @@ def test_dockerfile_bakes_code_scoped_install_method_stamp() -> None:
     published image self-identifying as 'docker' WITHOUT writing into the
     shared $HERMES_HOME data volume (which a host install may also use).
     The stamp is created by root in the shim-wiring RUN block; the hermes
-    user can't modify it (go-w from the --chmod on the source COPY).
+    user can't modify it (go-w from the source_permissions stage).
     """
     text = _dockerfile_text()
     assert "printf 'docker\\n' > /opt/hermes/.install_method" in text

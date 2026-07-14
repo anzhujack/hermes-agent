@@ -71,7 +71,11 @@ class TestBackgroundChildDoesNotHang:
 
     def test_foreground_streaming_output_still_captured(self, local_env):
         """Sanity: incremental output over time must still be captured in full."""
-        cmd = 'for i in 1 2 3; do echo "tick $i"; sleep 0.2; done; echo done'
+        cmd = (
+            "python3 -c 'import time; "
+            "[(print(f\"tick {i}\", flush=True), time.sleep(0.2)) "
+            "for i in range(1, 4)]; print(\"done\", flush=True)'"
+        )
         t0 = time.monotonic()
         result = local_env.execute(cmd, timeout=10)
         elapsed = time.monotonic() - t0

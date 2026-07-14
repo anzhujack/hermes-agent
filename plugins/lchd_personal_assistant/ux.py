@@ -118,7 +118,7 @@ def build_status(recent_routes: int = 5) -> dict[str, Any]:
         "中文阶段摘要": {
             "已完成": [name for name, ok in plugin_state.items() if ok] + [
                 "Wiki/Obsidian/Profile skeleton",
-                "v0.5 intent-aware routing and guarded parent-agent delegation",
+                "v0.6 intent-aware routing, SOUL injection, and execution audit",
             ],
             "未完成": [name for name, ok in plugin_state.items() if not ok],
             "验证建议": [

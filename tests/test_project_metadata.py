@@ -1,14 +1,24 @@
 """Regression tests for packaging metadata in pyproject.toml."""
 
-from pathlib import Path
 import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+
+def _load_project():
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject_path.open("rb") as handle:
+        return tomllib.load(handle)["project"]
 
 
 def _load_optional_dependencies():
-    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    with pyproject_path.open("rb") as handle:
-        project = tomllib.load(handle)["project"]
-    return project["optional-dependencies"]
+    return _load_project()["optional-dependencies"]
+
+
+def _load_dependencies():
+    return _load_project()["dependencies"]
 
 
 def _load_package_data():
@@ -99,6 +109,75 @@ def _exact_pins(specs):
         package = package.split("[", 1)[0].lower().replace("_", "-")
         pins[package] = version
     return pins
+
+
+def test_core_security_pins_use_fixed_versions():
+    """Core wheels must stay at or above the first OSV-fixed releases."""
+    pins = _exact_pins(_load_dependencies())
+
+    assert Version(pins["cryptography"]) >= Version("48.0.1")
+    assert Version(pins["pillow"]) >= Version("12.3.0")
+
+
+def test_dev_security_pins_use_fixed_versions():
+    """Development tooling must not reopen known audit findings."""
+    pins = _exact_pins(_load_optional_dependencies()["dev"])
+
+    assert Version(pins["pytest"]) >= Version("9.0.3")
+    assert Version(pins["pytest-asyncio"]) >= Version("1.3.0")
+
+
+def _requirements_by_name(specs):
+    requirements = (Requirement(spec) for spec in specs)
+    return {
+        requirement.name.lower().replace("_", "-"): requirement
+        for requirement in requirements
+    }
+
+
+def test_multipart_security_floor_covers_core_and_web_extra():
+    """CVE-fixed multipart releases must be selected on every install path."""
+    core = _requirements_by_name(_load_dependencies())["python-multipart"]
+    web = _requirements_by_name(_load_optional_dependencies()["web"])["python-multipart"]
+
+    assert Version("0.0.30") not in core.specifier
+    assert Version("0.0.31") in core.specifier
+    assert Version("0.0.30") not in web.specifier
+    assert Version("0.0.31") in web.specifier
+
+
+def test_starlette_security_floor_covers_server_extras():
+    """Every Starlette-backed feature must exclude the current vulnerable range."""
+    optional = _load_optional_dependencies()
+    for extra in ("dev", "mcp", "computer-use", "web"):
+        requirement = _requirements_by_name(optional[extra])["starlette"]
+        assert Version("1.3.0") not in requirement.specifier, extra
+        assert Version("1.3.1") in requirement.specifier, extra
+
+
+def test_transitive_security_floors_are_pinned_on_relevant_install_paths():
+    """Direct constraints must keep audited transitives above fixed releases."""
+    core_pins = _exact_pins(_load_dependencies())
+    optional = _load_optional_dependencies()
+
+    assert Version(core_pins["pygments"]) >= Version("2.20.0")
+    assert Version(core_pins["click"]) >= Version("8.3.3")
+    for extra in ("dev", "mcp", "computer-use", "teams"):
+        pins = _exact_pins(optional[extra])
+        assert Version(pins["pydantic-settings"]) >= Version("2.14.2"), extra
+    messaging_pins = _exact_pins(optional["messaging"])
+    assert Version(messaging_pins["pynacl"]) >= Version("1.6.2")
+    assert all("discord.py[voice]" not in spec.lower() for spec in optional["messaging"])
+
+    from tools.lazy_deps import LAZY_DEPS
+
+    lazy_discord_pins = _exact_pins(LAZY_DEPS["platform.discord"])
+    for package in ("discord.py", "pynacl", "davey", "aiohttp", "brotlicffi"):
+        assert lazy_discord_pins[package] == messaging_pins[package], package
+    assert all(
+        "discord.py[voice]" not in spec.lower()
+        for spec in LAZY_DEPS["platform.discord"]
+    )
 
 
 def test_pyproject_aiohttp_pins_match_lazy_slack_pin():

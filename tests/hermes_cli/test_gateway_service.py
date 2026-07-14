@@ -39,6 +39,10 @@ class TestUserSystemdPrivateSocketPreflight:
 
 
 class TestSystemdServiceRefresh:
+    @pytest.fixture(autouse=True)
+    def _mock_user_systemd_preflight(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *args, **kwargs: None)
+
     def test_systemd_install_repairs_outdated_unit_without_force(self, tmp_path, monkeypatch):
         unit_path = tmp_path / "hermes-gateway.service"
         unit_path.write_text("old unit\n", encoding="utf-8")
@@ -532,7 +536,12 @@ class TestGeneratedSystemdUnits:
             "_get_restart_drain_timeout",
             lambda: DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
         )
-        unit = gateway_cli.generate_systemd_unit(system=True)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+        unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
 
         assert "ExecStart=" in unit
         assert "ExecStop=" not in unit
@@ -1523,6 +1532,10 @@ class TestGatewayServiceDetection:
         assert gateway_cli._is_service_running() is False
 
 class TestGatewaySystemServiceRouting:
+    @pytest.fixture(autouse=True)
+    def _mock_user_systemd_preflight(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda *args, **kwargs: None)
+
     def test_systemd_restart_gracefully_restarts_running_service_and_waits(self, monkeypatch, capsys):
         calls = []
 
@@ -1863,6 +1876,66 @@ class TestGatewaySystemServiceRouting:
         assert "Gateway process is running for this profile" in out
         assert "PID(s): 4321" in out
 
+    def test_runtime_snapshot_detects_procd_from_gateway_cgroup(self, monkeypatch):
+        import hermes_constants
+
+        monkeypatch.setattr(gateway_cli, "find_gateway_pids", lambda: [5905])
+        monkeypatch.setattr(gateway_cli, "is_termux", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
+        monkeypatch.setattr(hermes_constants, "is_container", lambda: False)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_probe_procd_gateway_service",
+            lambda pids: "hermes-gateway",
+        )
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: False)
+
+        snapshot = gateway_cli.get_gateway_runtime_snapshot()
+
+        assert snapshot.manager == "procd (hermes-gateway)"
+        assert snapshot.service_scope == "procd"
+        assert snapshot.service_installed is True
+        assert snapshot.service_running is True
+        assert snapshot.gateway_pids == (5905,)
+
+    def test_gateway_status_reports_procd_managed_process(self, monkeypatch, capsys):
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_termux", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_runtime_health_lines", lambda: [])
+        monkeypatch.setattr(gateway_cli, "_print_other_profiles_gateway_status", lambda: None)
+        monkeypatch.setattr(
+            gateway_cli,
+            "get_gateway_runtime_snapshot",
+            lambda system=False: gateway_cli.GatewayRuntimeSnapshot(
+                manager="procd (hermes-gateway)",
+                service_installed=True,
+                service_running=True,
+                gateway_pids=(5905,),
+                service_scope="procd",
+            ),
+        )
+
+        gateway_cli.gateway_command(
+            SimpleNamespace(gateway_command="status", deep=False, system=False, full=False)
+        )
+
+        out = capsys.readouterr().out
+        assert "procd" in out
+        assert "PID: 5905" in out
+        assert "Running manually" not in out
+        assert "install as a service" not in out
+
+    def test_procd_service_name_parser_accepts_openwrt_cgroup(self):
+        assert gateway_cli._procd_service_name_from_cgroup_text(
+            "0::/services/hermes-gateway/instance1\n"
+        ) == "hermes-gateway"
+        assert gateway_cli._procd_service_name_from_cgroup_text(
+            "0::/system.slice/hermes-gateway.service\n"
+        ) is None
+
     def test_gateway_status_on_termux_shows_manual_guidance(self, monkeypatch, capsys):
         monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: False)
         monkeypatch.setattr(gateway_cli, "is_termux", lambda: True)
@@ -2097,7 +2170,12 @@ class TestGeneratedUnitIncludesLocalBin:
             "_build_user_local_paths",
             lambda home_path, existing: [str(home_path / ".local" / "bin")],
         )
-        unit = gateway_cli.generate_systemd_unit(system=True)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+        unit = gateway_cli.generate_systemd_unit(system=True, run_as_user="alice")
         # System unit uses the resolved home dir from _system_service_identity
         assert "/.local/bin" in unit
 

@@ -1249,6 +1249,36 @@ def _probe_launchd_service_running() -> bool:
     return _parse_launchd_pid_from_list_output(result.stdout) is not None
 
 
+def _procd_service_name_from_cgroup_text(text: str) -> str | None:
+    """Return an OpenWrt procd service name from a cgroup v2 membership."""
+    for raw_line in text.splitlines():
+        cgroup_path = raw_line.rsplit(":", 1)[-1].strip()
+        parts = [part for part in cgroup_path.split("/") if part]
+        if len(parts) < 3 or parts[0] != "services":
+            continue
+        service_name = parts[1]
+        if service_name == "hermes-gateway" or service_name.startswith("hermes-gateway-"):
+            return service_name
+    return None
+
+
+def _probe_procd_gateway_service(pids: tuple[int, ...] | list[int]) -> str | None:
+    """Detect whether a discovered gateway PID is supervised by OpenWrt procd."""
+    if not is_linux():
+        return None
+    for pid in pids:
+        if pid <= 0:
+            continue
+        try:
+            text = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        service_name = _procd_service_name_from_cgroup_text(text)
+        if service_name:
+            return service_name
+    return None
+
+
 def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot:
     """Return a unified view of gateway liveness for the current profile."""
     gateway_pids = tuple(find_gateway_pids())
@@ -1295,6 +1325,16 @@ def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot
         return GatewayRuntimeSnapshot(
             manager="docker (foreground)",
             gateway_pids=gateway_pids,
+        )
+
+    procd_service = _probe_procd_gateway_service(gateway_pids)
+    if procd_service:
+        return GatewayRuntimeSnapshot(
+            manager=f"procd ({procd_service})",
+            service_installed=True,
+            service_running=True,
+            gateway_pids=gateway_pids,
+            service_scope="procd",
         )
 
     if supports_systemd_services():
@@ -6981,6 +7021,18 @@ def _gateway_command_inner(args):
 
             gateway_windows.status(deep=deep)
             _print_gateway_process_mismatch(snapshot)
+        elif snapshot.service_scope == "procd" and snapshot.service_running:
+            pids = list(snapshot.gateway_pids)
+            print(f"✓ Gateway service is running under {snapshot.manager} (PID: {_format_gateway_pids(pids, limit=None)})")
+            if deep:
+                print("  Supervisor: OpenWrt/ImmortalWrt procd")
+                print("  Cgroup supervision detected from /proc/<pid>/cgroup")
+            runtime_lines = _runtime_health_lines()
+            if runtime_lines:
+                print()
+                print("Recent gateway health:")
+                for line in runtime_lines:
+                    print(f"  {line}")
         else:
             # Check for manually running processes
             pids = list(snapshot.gateway_pids)

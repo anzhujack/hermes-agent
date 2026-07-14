@@ -311,6 +311,14 @@ class TestProvidersDictApiModeAnthropicMessages:
     ``resolve_provider_client``'s named-custom branch never read it.
     """
 
+    @pytest.fixture(autouse=True)
+    def _stub_anthropic_sdk_client(self, monkeypatch):
+        """Exercise transport routing without requiring the optional SDK."""
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.build_anthropic_client",
+            lambda *_args, **_kwargs: MagicMock(),
+        )
+
     def test_providers_dict_propagates_api_mode(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MYRELAY_API_KEY", "sk-test")
         _write_config(tmp_path, {

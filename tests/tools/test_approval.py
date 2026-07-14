@@ -700,6 +700,14 @@ class TestSensitiveRedirectPattern:
         assert dangerous is True
         assert key is not None
 
+    def test_redirect_to_one_component_posix_home_bashrc(self, monkeypatch):
+        """Root/container homes such as /root must not bypass rc-file guards."""
+        monkeypatch.setenv("HOME", "/root")
+
+        dangerous, key, _ = detect_dangerous_command("echo x > /root/.bashrc")
+        assert dangerous is True
+        assert key is not None
+
     def test_redirect_to_other_absolute_home_bashrc_is_not_current_user_sensitive(self):
         dangerous, key, desc = detect_dangerous_command("echo x > /tmp/not-current-home/.bashrc")
         assert dangerous is False

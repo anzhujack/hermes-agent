@@ -47,7 +47,7 @@ class TestFindExcludesHiddenDirs:
     def test_find_skips_hub_cache_files(self, searchable_tree):
         """find should not return files from .hub/ directory."""
         cmd = (
-            f"find {searchable_tree} -not -path '*/.*' -type f -name '*.json'"
+            f"find {searchable_tree} ! -path '*/.*' -type f -name '*.json'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "catalog.json" not in result.stdout
@@ -56,7 +56,7 @@ class TestFindExcludesHiddenDirs:
     def test_find_skips_git_internals(self, searchable_tree):
         """find should not return files from .git/ directory."""
         cmd = (
-            f"find {searchable_tree} -not -path '*/.*' -type f -name '*.idx'"
+            f"find {searchable_tree} ! -path '*/.*' -type f -name '*.idx'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "pack-abc.idx" not in result.stdout
@@ -65,7 +65,7 @@ class TestFindExcludesHiddenDirs:
     def test_find_still_returns_visible_files(self, searchable_tree):
         """find should still return files from visible directories."""
         cmd = (
-            f"find {searchable_tree} -not -path '*/.*' -type f -name '*.md'"
+            f"find {searchable_tree} ! -path '*/.*' -type f -name '*.md'"
         )
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         assert "SKILL.md" in result.stdout

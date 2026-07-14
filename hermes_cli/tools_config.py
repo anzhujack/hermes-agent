@@ -4430,15 +4430,22 @@ def _print_tools_list(enabled_toolsets: set, mcp_servers: dict, platform: str = 
         print()
         print("MCP servers:")
         for srv_name, srv_cfg in mcp_servers.items():
+            server_enabled = _parse_enabled_flag(srv_cfg.get("enabled"), default=True)
+            server_status = (
+                color("✓ server enabled", Colors.GREEN)
+                if server_enabled
+                else color("✗ server disabled", Colors.RED)
+            )
             tools_cfg = srv_cfg.get("tools") or {}
             exclude = tools_cfg.get("exclude") or []
             include = tools_cfg.get("include") or []
             if include:
-                _print_info(f"{srv_name}  [include only: {', '.join(include)}]")
+                filter_status = f"tool filter includes only: {', '.join(include)}"
             elif exclude:
-                _print_info(f"{srv_name}  [excluded: {color(', '.join(exclude), Colors.YELLOW)}]")
+                filter_status = f"tool filter excludes: {color(', '.join(exclude), Colors.YELLOW)}"
             else:
-                _print_info(f"{srv_name}  {color('all tools enabled', Colors.DIM)}")
+                filter_status = color("tool filter allows all", Colors.DIM)
+            _print_info(f"{srv_name}  {server_status}; {filter_status}")
 
 
 def tools_disable_enable_command(args):

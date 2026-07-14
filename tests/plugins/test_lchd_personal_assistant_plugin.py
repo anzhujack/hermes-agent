@@ -100,11 +100,23 @@ def test_unified_plugin_registers_all_tools_and_hooks():
         "lchd_task_finalize",
     ]
     assert {tool["toolset"] for tool in ctx.tools} == {"lchd_personal"}
-    assert [name for name, _ in ctx.hooks] == ["pre_tool_call", "transform_tool_result", "pre_llm_call"]
+    assert [name for name, _ in ctx.hooks] == [
+        "pre_tool_call",
+        "transform_tool_result",
+        "pre_llm_call",
+        "subagent_start",
+        "subagent_stop",
+    ]
     assert plugin.__file__ is not None
     metadata = yaml.safe_load((Path(plugin.__file__).with_name("plugin.yaml")).read_text(encoding="utf-8"))
-    assert metadata["version"] == "0.5.0"
-    assert metadata["hooks"] == ["pre_tool_call", "transform_tool_result", "pre_llm_call"]
+    assert metadata["version"] == "0.6.0"
+    assert metadata["hooks"] == [
+        "pre_tool_call",
+        "transform_tool_result",
+        "pre_llm_call",
+        "subagent_start",
+        "subagent_stop",
+    ]
 
 
 def test_task_route_schema_discourages_routing_and_delegating_simple_tasks():
@@ -348,6 +360,30 @@ def test_task_route_keeps_simple_hermes_change_direct(_isolated_lchd_home):
             ["coordinator", "builder", "writer"],
             True,
         ),
+        (
+            "审计三家 AI API 中转站的真实性、安全性和供应链风险，要求交叉核验",
+            "",
+            "research",
+            "non_trivial",
+            ["coordinator", "researcher", "writer"],
+            True,
+        ),
+        (
+            "制作一条完整 AI 动画视频，从脚本、分镜、配音到成片",
+            "",
+            "media_production",
+            "non_trivial",
+            ["coordinator", "writer", "builder"],
+            True,
+        ),
+        (
+            "只读诊断当前网络连通性问题，检查代理日志和配置，不做修改",
+            "",
+            "ops",
+            "non_trivial",
+            ["coordinator", "builder", "researcher"],
+            True,
+        ),
     ],
 )
 def test_task_route_classification_and_delegation_matrix(
@@ -509,7 +545,7 @@ def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
     assert route["experts"][0] == "coordinator"
     assert "builder" in route["experts"]
     assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["verification"]
-    assert route["version"] == "0.5.0"
+    assert route["version"] == "0.6.0"
     assert route["risk_level"] == "medium"
     assert route["requires_confirmation"] is False
     assert route["human_gate"]["required"] is False
@@ -530,6 +566,89 @@ def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
 
     route_only = json.loads(plugin.handle_task_route({"task": "v0.2 四专家路由最终验证"}))
     assert route_only["task_type"] == "hermes_dev"
+
+
+def test_task_route_audit_redacts_secret_like_values(_isolated_lchd_home):
+    plugin = _load_package()
+    task = (
+        "检查 Hermes 配置 api_key=credential-value-123 "
+        "password=example-pass-456 Authorization: Bearer example-token-789"
+    )
+
+    route = json.loads(plugin.handle_task_route({"task": task}))
+    audit = json.loads(Path(route["audit_path"]).read_text(encoding="utf-8").splitlines()[-1])
+    serialized = json.dumps(audit, ensure_ascii=False)
+
+    assert "[REDACTED]" in audit["task"]
+    assert "credential-value-123" not in serialized
+    assert "example-pass-456" not in serialized
+    assert "example-token-789" not in serialized
+
+
+def test_delegation_context_injects_only_the_selected_expert_soul(_isolated_lchd_home):
+    plugin = _load_package()
+    profiles = _isolated_lchd_home / "lchd-profiles"
+    (profiles / "researcher" / "SOUL.md").write_text(
+        "RESEARCHER-SOUL: authority-first cross-checking", encoding="utf-8"
+    )
+    (profiles / "writer" / "SOUL.md").write_text(
+        "WRITER-SOUL: concise synthesis", encoding="utf-8"
+    )
+
+    route = json.loads(
+        plugin.handle_task_route(
+            {"task": "联网调研并比较多个方案，要求多来源交叉核验", "context": ""}
+        )
+    )
+    tasks = route["delegation"]["tasks"]
+    researcher_context = next(task["context"] for task in tasks if task["expert"] == "researcher")
+    writer_context = next(task["context"] for task in tasks if task["expert"] == "writer")
+
+    assert "RESEARCHER-SOUL: authority-first cross-checking" in researcher_context
+    assert "WRITER-SOUL: concise synthesis" not in researcher_context
+    assert "WRITER-SOUL: concise synthesis" in writer_context
+    assert "RESEARCHER-SOUL: authority-first cross-checking" not in writer_context
+
+
+def test_subagent_execution_audit_records_safe_lifecycle(_isolated_lchd_home):
+    plugin = _load_package()
+
+    plugin.on_subagent_start(
+        parent_session_id="parent-session-sensitive",
+        parent_turn_id="turn-sensitive",
+        child_session_id="child-session-sensitive",
+        child_subagent_id="child-sa-sensitive",
+        child_role="researcher",
+        child_goal="research with api_key=sk-live-super-secret",
+    )
+    plugin.on_subagent_stop(
+        parent_session_id="parent-session-sensitive",
+        parent_turn_id="turn-sensitive",
+        child_session_id="child-session-sensitive",
+        child_role="researcher",
+        child_summary="Bearer secret-summary-token",
+        child_status="completed",
+        duration_ms=1234,
+    )
+
+    audit_path = _isolated_lchd_home / "wiki" / "logs" / "delegation_executions.jsonl"
+    rows = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert [row["event"] for row in rows] == ["subagent_start", "subagent_stop"]
+    assert rows[0]["child_session_ref"] == rows[1]["child_session_ref"]
+    assert rows[1]["status"] == "completed"
+    assert rows[1]["duration_ms"] == 1234
+    serialized = json.dumps(rows, ensure_ascii=False)
+    for secret in (
+        "parent-session-sensitive",
+        "turn-sensitive",
+        "child-session-sensitive",
+        "child-sa-sensitive",
+        "sk-live-super-secret",
+        "secret-summary-token",
+    ):
+        assert secret not in serialized
+    assert "child_goal" not in serialized
+    assert "child_summary" not in serialized
 
 
 def test_task_route_marks_human_gate_for_high_risk_ops(_isolated_lchd_home):
@@ -555,7 +674,7 @@ def test_task_route_builds_parallel_research_delegation_plan(_isolated_lchd_home
     route = json.loads(plugin.handle_task_route({"task": "联网搜索 Hermes delegate_task 和多智能体 human-in-the-loop 方案，给我 v0.4 方案"}))
 
     assert route["ok"] is True
-    assert route["version"] == "0.5.0"
+    assert route["version"] == "0.6.0"
     assert route["task_type"] == "research"
     assert route["delegation"]["recommended"] is True
     assert route["delegation"]["mode"] == "parallel_research"
@@ -604,7 +723,7 @@ def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
     }))
 
     assert decision["ok"] is True
-    assert decision["version"] == "0.5.0"
+    assert decision["version"] == "0.6.0"
     assert decision["recommendations"]["write_handoff"] is True
     assert decision["recommendations"]["update_wiki"] is True
     assert decision["recommendations"]["suggest_skill"] is True

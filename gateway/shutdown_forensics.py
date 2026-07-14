@@ -220,9 +220,8 @@ def spawn_async_diagnostic(
     except OSError:
         return None
 
-    # Inline shell so we don't have to ship a helper script.  bash -c is
-    # available on every POSIX target we support; on Windows we just skip
-    # the snapshot (the platform doesn't ship ps anyway).
+    # Inline shell so we don't have to ship a helper script. On Windows we
+    # skip the snapshot (the platform doesn't ship ps anyway).
     if sys.platform == "win32":
         return None
 
@@ -238,6 +237,14 @@ def spawn_async_diagnostic(
         "echo '--- recent dmesg (oom/killed) ---'; "
         "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
         "echo '=== end ==='"
+    )
+    watchdog = (
+        "import subprocess\n"
+        "try:\n"
+        f"    subprocess.run(['sh', '-c', {script!r}], "
+        f"timeout={timeout_seconds!r}, check=False)\n"
+        "except subprocess.TimeoutExpired:\n"
+        "    pass\n"
     )
 
     try:
@@ -255,7 +262,7 @@ def spawn_async_diagnostic(
         # start_new_session, a SIGKILL on our cgroup takes the diag down
         # before it can flush.
         proc = subprocess.Popen(
-            ["timeout", f"{timeout_seconds:.0f}", "bash", "-c", script],
+            [sys.executable, "-c", watchdog],
             stdout=fd,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

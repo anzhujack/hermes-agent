@@ -19,6 +19,7 @@ from .context import (
     handle_runtime_snapshot,
     handle_vault_lookup,
 )
+from .delegation_audit import on_subagent_start, on_subagent_stop
 from .guardrails import (
     LCHD_GUARDRAILS_CHECK_SCHEMA,
     handle_guardrails_check,
@@ -44,6 +45,8 @@ def register(ctx) -> None:
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("transform_tool_result", on_transform_tool_result)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
+    ctx.register_hook("subagent_start", on_subagent_start)
+    ctx.register_hook("subagent_stop", on_subagent_stop)
     ctx.register_tool(
         name="lchd_context_profile",
         toolset=_TOOLSET,

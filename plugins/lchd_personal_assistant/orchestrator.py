@@ -3,13 +3,14 @@
 This module turns the v0.1 static SOUL profile skeleton into a verifiable
 routing layer. It remains deliberately small: no new core tools, no external
 agent framework, and no automatic side effects beyond an audit JSONL that lets
-future sessions prove routing happened. v0.5 hardens parent-agent routing habits,
-task/context precedence, complexity gating, and guarded delegation decisions.
+future sessions prove routing happened. v0.6 adds specialist SOUL injection,
+privacy-safe execution lifecycle audit, and broader task-family evaluation.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,8 @@ except Exception:  # pragma: no cover
         return {}
 
 _ROLE_ORDER = ("coordinator", "researcher", "writer", "builder")
-_PLUGIN_VERSION = "0.5.0"
+_PLUGIN_VERSION = "0.6.0"
+_SOUL_CONTEXT_MAX_CHARS = 1600
 _ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "coordinator": {
         "label": "项目经理",
@@ -229,6 +231,23 @@ def _classify_text(text: str) -> dict[str, Any]:
             "verification": ["cite authoritative sources", "cross-check claims"],
         }
 
+    media_domain = _contains_any(text, (
+        "视频", "动画", "短片", "成片", "分镜", "配音", "剪辑", "字幕",
+        "video", "animation", "storyboard", "voiceover",
+    ))
+    media_action = _contains_any(text, (
+        "制作", "生成", "产出", "策划", "剪辑", "配音", "合成", "渲染", "做一条",
+        "produce", "create", "render", "edit",
+    ))
+    if media_domain and media_action:
+        return {
+            "task_type": "media_production",
+            "execution_mode": "producer_review",
+            "experts": ["coordinator", "writer", "builder"],
+            "knowledge_sources": ["project files", "asset library", "media tools"],
+            "verification": ["verify artifact paths", "review script-to-output continuity"],
+        }
+
     writing_action = _contains_any(text, (
         "写一段", "写一份", "写篇", "撰写", "润色", "改写", "续写", "总结",
         "生成文案", "整理成报告", "写报告", "写大纲", "写正文", "创作", "起草",
@@ -244,7 +263,8 @@ def _classify_text(text: str) -> dict[str, Any]:
 
     ops_domain = _contains_any(text, (
         "路由器", "sing-box", "singbox", "momo", "dns", "docker", "端口", "服务",
-        "cron", "ext4", "磁盘", "网关进程",
+        "cron", "ext4", "磁盘", "网关进程", "网络", "连通性", "代理日志", "代理服务",
+        "network", "connectivity", "proxy logs",
     ))
     ops_action = _contains_any(text, (
         "检查", "查看", "诊断", "排障", "修复", "重启", "停止", "启动", "配置",
@@ -318,6 +338,12 @@ def _apply_task_complexity(
         ))
         complexity = "non_trivial" if writing_complex else "simple"
         reason = "Long-form synthesis benefits from a writer workstream." if writing_complex else "Short-form writing is handled directly."
+    elif task_type == "media_production":
+        media_complex = common_complex or _contains_any(text, (
+            "完整", "从脚本", "分镜", "配音", "剪辑", "字幕", "成片", "批量", "多阶段",
+        ))
+        complexity = "non_trivial" if media_complex else "simple"
+        reason = "Multi-stage media production benefits from writer and builder workstreams." if media_complex else "A narrow media edit is handled directly."
     elif task_type == "ops":
         ops_complex = common_complex or _contains_any(text, (
             "诊断", "排障", "故障", "启动脚本", "多项", "日志和配置", "根因",
@@ -430,6 +456,20 @@ def _assess_human_gate(task: str, context: str, route: dict[str, Any]) -> dict[s
     }
 
 
+def _load_soul_guidance(expert: str) -> str:
+    """Load a bounded, trusted local SOUL excerpt for one planned child."""
+    if expert not in _ROLE_ORDER:
+        return ""
+    try:
+        text = (_profiles_dir() / expert / "SOUL.md").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    text = text.replace("\x00", "")
+    if len(text) > _SOUL_CONTEXT_MAX_CHARS:
+        return text[:_SOUL_CONTEXT_MAX_CHARS].rstrip() + "\n...[SOUL truncated]"
+    return text
+
+
 def _delegation_context(
     *,
     expert: str,
@@ -450,13 +490,18 @@ def _delegation_context(
     }
     lines = [
         f"You are Lchd Personal Hermes' {expert} expert subagent.",
+    ]
+    soul_guidance = _load_soul_guidance(expert)
+    if soul_guidance:
+        lines.extend(["", "Specialist SOUL guidance:", soul_guidance])
+    lines.extend([
         "",
         "User task:",
         user_task,
         "",
         "Route summary:",
         json.dumps(route_summary, ensure_ascii=False, sort_keys=True),
-    ]
+    ])
     if extra_context:
         lines.extend(["", "Extra parent context:", extra_context])
     lines.extend([
@@ -632,6 +677,38 @@ def _build_delegation_plan(task: str, context: str, route: dict[str, Any]) -> di
             ),
         ]
         return _with_tasks(plan, tasks, blocked=blocked)
+    if task_type == "media_production":
+        plan.update({
+            "mode": "producer_review",
+            "reason": "Multi-stage media work benefits from a writer blueprint and builder execution with artifact verification.",
+            "parent_verification": verification,
+            "merge_strategy": "Parent agent verifies source assets, generated artifact paths, and continuity before delivery.",
+        })
+        tasks = [
+            _planned_task(
+                expert="writer",
+                goal="Draft the script, storyboard, and production checklist for the requested media artifact.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=["read project briefs", "draft script and storyboard", "identify required assets"],
+                forbidden=common_forbidden + ["publish or send media externally"],
+                verification=verification,
+                output_contract=["script", "storyboard", "asset checklist", "continuity risks"],
+            ),
+            _planned_task(
+                expert="builder",
+                goal="Build or verify the requested local media artifact from approved inputs and return exact artifact paths.",
+                user_task=task,
+                extra_context=context,
+                route=route,
+                allowed=["inspect approved local assets", "use available media tools", "create artifacts only in the explicit project scope", "verify file paths and formats"],
+                forbidden=common_forbidden + ["publish, upload, or send externally", "use private assets outside the explicit scope"],
+                verification=verification,
+                output_contract=["artifact paths", "tools used", "verification results", "remaining gaps"],
+            ),
+        ]
+        return _with_tasks(plan, tasks, blocked=blocked)
     if task_type == "writing":
         plan.update({
             "mode": "writer_synthesis",
@@ -680,6 +757,23 @@ def _delegation_summary(delegation: dict[str, Any]) -> dict[str, Any]:
         "dispatch_allowed": bool(delegation.get("dispatch_allowed")),
         "task_count": int(delegation.get("task_count") or len(delegation.get("tasks") or [])),
     }
+
+
+_AUDIT_SECRET_RE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|token|password|passwd|secret|authorization|cookie)"
+    r"(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_AUDIT_BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+
+
+def _audit_preview(task: str, max_chars: int = 500) -> str:
+    """Return a bounded route preview with common credential forms removed."""
+    text = _AUDIT_BEARER_RE.sub("Bearer [REDACTED]", str(task or ""))
+    text = _AUDIT_SECRET_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        text,
+    )
+    return text[:max_chars]
 
 
 def _append_audit(record: dict[str, Any]) -> Path:
@@ -767,7 +861,7 @@ def build_task_route(task: str, context: str = "") -> dict[str, Any]:
     route_for_audit = {key: value for key, value in route.items() if key != "delegation"}
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "task": task[:500],
+        "task": _audit_preview(task),
         "context_present": bool(context),
         **route_for_audit,
         "delegation_summary": _delegation_summary(delegation),

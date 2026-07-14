@@ -41,6 +41,59 @@ logger = logging.getLogger(__name__)
 _OWNER_REPLY_PREFIX = "[owner reply] "
 
 
+def _listener_pids_from_proc(port: int) -> list[int]:
+    """Resolve Linux LISTEN socket owners without lsof/ss.
+
+    Minimal OpenWrt/ImmortalWrt images often ship neither command. Parse only
+    TCP state ``0A`` (LISTEN), then map those socket inodes through
+    ``/proc/<pid>/fd``. Connected client sockets have different inodes and can
+    therefore never be returned by this fallback.
+    """
+    if platform.system() != "Linux":
+        return []
+
+    listener_inodes: set[str] = set()
+    for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
+        try:
+            lines = table.read_text(encoding="ascii").splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 10 or fields[3] != "0A":
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError):
+                continue
+            if local_port == port:
+                listener_inodes.add(fields[9])
+
+    if not listener_inodes:
+        return []
+
+    socket_targets = {f"socket:[{inode}]" for inode in listener_inodes}
+    pids: set[int] = set()
+    try:
+        proc_entries = list(Path("/proc").iterdir())
+    except OSError:
+        return []
+    for proc_entry in proc_entries:
+        if not proc_entry.name.isdigit():
+            continue
+        try:
+            for fd_entry in (proc_entry / "fd").iterdir():
+                try:
+                    if os.readlink(fd_entry) in socket_targets:
+                        pids.add(int(proc_entry.name))
+                        break
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return sorted(pids)
+
+
 def _listener_pids_on_port(port: int) -> list:
     """PIDs of processes *listening* on ``port`` (POSIX) — never clients.
 
@@ -64,9 +117,9 @@ def _listener_pids_on_port(port: int) -> list:
                 pass
         if pids:
             return pids
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
         pass  # lsof not installed — fall through to ss
-    # Fallback: ss (iproute2, present on virtually every modern Linux).
+    # Fallback: ss (iproute2, present on many full Linux distributions).
     try:
         result = subprocess.run(
             ["ss", "-ltnHp", f"sport = :{port}"],
@@ -74,9 +127,12 @@ def _listener_pids_on_port(port: int) -> list:
         )
         for m in re.finditer(r"pid=(\d+)", result.stdout):
             pids.append(int(m.group(1)))
-    except FileNotFoundError:
+        if pids:
+            return sorted(set(pids))
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
         pass
-    return pids
+    # Last resort for minimal Linux/OpenWrt images: no external command needed.
+    return _listener_pids_from_proc(port)
 
 
 def _kill_port_process(port: int) -> None:

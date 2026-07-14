@@ -346,13 +346,13 @@ class TestExtractCacheBustingConfig:
         assert sig_mem0["memory.provider"] == "mem0"
         assert sig_honcho != sig_mem0
 
-    def test_honcho_cache_busting_config_memoized_by_mtime(self, monkeypatch, tmp_path):
+    def test_honcho_cache_busting_config_memoized_by_content(self, monkeypatch, tmp_path):
         """Repeated Honcho extraction for unchanged honcho.json should reuse parse result."""
         from types import SimpleNamespace
         from gateway.run import GatewayRunner
 
         config_path = tmp_path / "honcho.json"
-        config_path.write_text("{}")
+        config_path.write_text('{"a":1}')
         parse_calls = []
 
         class FakeConfig:
@@ -381,7 +381,9 @@ class TestExtractCacheBustingConfig:
         assert first["honcho.user_peer_aliases"] == [("123", "eri")]
         assert parse_calls == [config_path]
 
-        config_path.write_text("{\n  \"changed\": true\n}")
+        # Same-size overwrite must still invalidate the memo even when the
+        # filesystem preserves the timestamp at coarse resolution.
+        config_path.write_text('{"b":2}')
         third = GatewayRunner._extract_honcho_cache_busting_config()
 
         assert third == first

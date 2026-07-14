@@ -6667,7 +6667,7 @@ def require_readable_config_before_write(config_path: Optional[Path] = None) -> 
     if config_path is None:
         config_path = get_config_path()
     try:
-        config_path.stat()
+        config_stat = config_path.stat()
     except FileNotFoundError:
         return
     except OSError as exc:
@@ -6675,6 +6675,16 @@ def require_readable_config_before_write(config_path: Optional[Path] = None) -> 
             f"Refusing to overwrite {config_path}: existing config.yaml cannot be accessed "
             f"({exc}). Fix the file permissions or move it aside first."
         ) from exc
+
+    # Root can read a mode-000 file despite its explicit permission bits. Treat
+    # that file as unreadable anyway: an administrator who removed every read
+    # bit did not consent to a full-file replacement by a privileged process.
+    read_bits = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+    if not config_stat.st_mode & read_bits:
+        raise RuntimeError(
+            f"Refusing to overwrite {config_path}: existing config.yaml has no read "
+            "permission bits. Fix the file permissions or move it aside first."
+        )
 
     try:
         with open(config_path, "rb") as f:

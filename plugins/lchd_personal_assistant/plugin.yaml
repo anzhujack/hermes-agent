@@ -1,8 +1,10 @@
 name: lchd-personal-assistant
-version: "0.5.0"
+version: "0.6.0"
 description: "Unified personal assistant tools for Lchd."
 author: "Lchd + Hermes Agent"
 hooks:
   - pre_tool_call
   - transform_tool_result
   - pre_llm_call
+  - subagent_start
+  - subagent_stop

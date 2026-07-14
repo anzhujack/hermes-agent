@@ -127,18 +127,22 @@ class TestAbiStamp:
         assert not (target / "stalepkg").exists()
         assert (target / ld._TARGET_STAMP_NAME).read_text().strip() == ld._python_abi_tag()
 
-    def test_readonly_target_reports_error(self, tmp_path):
-        # A path under a non-writable parent should surface a clean error,
-        # not raise.
-        ro_parent = tmp_path / "ro"
-        ro_parent.mkdir()
-        os.chmod(ro_parent, 0o500)
-        try:
-            err = ld._ensure_target_ready(ro_parent / "lazy")
-            assert err is not None
-            assert "not writable" in err
-        finally:
-            os.chmod(ro_parent, 0o700)  # let pytest clean up
+    def test_readonly_target_reports_error(self, tmp_path, monkeypatch):
+        # Simulate a read-only parent deterministically. chmod(0500) is not a
+        # reliable permission failure when the suite runs as root (for example
+        # inside the Hermes development container).
+        target = tmp_path / "ro" / "lazy"
+        original_mkdir = Path.mkdir
+
+        def deny_target_mkdir(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("simulated read-only filesystem")
+            return original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", deny_target_mkdir)
+        err = ld._ensure_target_ready(target)
+        assert err is not None
+        assert "not writable" in err
 
 
 # ---------------------------------------------------------------------------

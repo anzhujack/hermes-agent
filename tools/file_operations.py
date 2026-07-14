@@ -989,10 +989,11 @@ class ShellFileOperations(FileOperations):
         #  - `mktemp` lands the temp in the target's own dir (-p) so `mv` is
         #    same-FS atomic; we fall back to a PID-stamped name if the
         #    backend lacks mktemp (rare; busybox/macOS/Linux all ship it).
-        #  - `chmod --reference` is GNU-only, so we read the octal mode with
-        #    `stat` (GNU `-c%a` or BSD `-f%Lp`) and `chmod` it explicitly;
-        #    silent best-effort — a perms-copy failure must not abort the
-        #    write, the file still lands with default umask perms.
+        #  - Prefer GNU/BSD `stat` + `chmod`, which preserves mode without
+        #    copying the target's bytes. If `stat` is absent (minimal
+        #    BusyBox/OpenWrt) and the target is a regular file, `cp -p` is the
+        #    portable fallback before stdin overwrites the temp. Metadata copy
+        #    remains best-effort; failure leaves mktemp's safe default mode.
         #  - `trap ... EXIT` guarantees the temp is removed on every error
         #    path (cat failure, mv failure, signal) but NOT after a
         #    successful mv (the temp no longer exists by then).
@@ -1008,8 +1009,9 @@ class ShellFileOperations(FileOperations):
             # preserve mode of an existing target (best-effort, never fatal)
             'if [ -e "$t" ]; then '
             'm="$(stat -c%a "$t" 2>/dev/null || stat -f%Lp "$t" 2>/dev/null || true)"; '
-            '[ -n "$m" ] && chmod "$m" "$tmp" 2>/dev/null || true; '
-            "fi; "
+            'if [ -n "$m" ]; then chmod "$m" "$tmp" 2>/dev/null || true; '
+            'elif [ -f "$t" ]; then cp -p "$t" "$tmp" 2>/dev/null || true; '
+            "fi; fi; "
             'cat > "$tmp"; '
             'mv -f "$tmp" "$t"; '
             "trap - EXIT"
@@ -2125,7 +2127,9 @@ class ShellFileOperations(FileOperations):
             )
 
         # Exclude hidden directories (matching ripgrep's default behavior).
-        hidden_exclude = "-not -path '*/.*'" if not has_hidden_path_ancestor else ""
+        # POSIX/BusyBox find supports `!`; GNU's `-not` spelling does not exist
+        # on minimal OpenWrt images.
+        hidden_exclude = "! -path '*/.*'" if not has_hidden_path_ancestor else ""
         hidden_filter_expr = f" {hidden_exclude}" if hidden_exclude else ""
 
         # Use shell pagination for standard roots. For hidden roots, gather full

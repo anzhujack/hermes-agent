@@ -872,19 +872,21 @@ def _home_prefix_fold_regex(path: str):
     patterns (``~/.ssh/authorized_keys``) still match. The trailing tail is
     required (``+``), so a bare home with no path under it is not folded.
 
-    Returns ``None`` for an unset or degenerate path — one with fewer than two
-    components below the root — so a stray HOME / HERMES_HOME such as ``/``,
-    ``C:\\`` or ``""`` cannot rewrite unrelated filesystem prefixes. Cached
-    because the resolved home is stable across calls on this hot path.
+    Returns ``None`` for an unset or root-only path (``/``, ``C:\\`` or ``""``)
+    so a degenerate HOME / HERMES_HOME cannot rewrite unrelated filesystem
+    prefixes. A one-component POSIX home such as ``/root`` is valid and must be
+    folded; otherwise root's shell rc and SSH files bypass approval detection.
+    Cached because the resolved home is stable across calls on this hot path.
     """
     if not path:
         return None
     components = [c for c in re.split(r"[/\\]+", path) if c]
-    # Require at least two non-empty components below the root. For POSIX this
-    # mirrors the historical ``count("/") >= 2`` guard (``/home/alice`` folds,
-    # ``/home`` does not); for Windows it rejects a bare drive root (``C:\\``)
-    # while accepting a real home (``C:\\Users\\alice``).
-    if len(components) < 2:
+    # Reject only a filesystem root. One-component POSIX homes (notably
+    # ``/root`` and container homes such as ``/data``) are legitimate. A lone
+    # Windows drive component still denotes a drive root and must not fold.
+    if not components or (
+        len(components) == 1 and re.fullmatch(r"[A-Za-z]:", components[0])
+    ):
         return None
     body = r"[/\\]+".join(re.escape(c) for c in components)
     # Optional leading root separator (POSIX ``/`` or UNC ``\\``); a Windows

@@ -49,6 +49,8 @@ def match_tree(tmp_path):
 @pytest.fixture
 def partial_error_tree(tmp_path):
     """A tree with matches plus one unreadable file (forces exit 2 + matches)."""
+    if not hasattr(os, "geteuid") or os.geteuid() == 0:
+        pytest.skip("requires an unprivileged POSIX user; root bypasses mode 000")
     for i in range(4):
         (tmp_path / f"f{i}.txt").write_text(f"needle line {i}\n")
     sub = tmp_path / "sub"

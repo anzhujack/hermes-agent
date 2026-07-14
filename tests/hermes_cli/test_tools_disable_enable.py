@@ -165,6 +165,20 @@ class TestToolsList:
         assert "web" in out
         assert "memory" in out
 
+    def test_list_shows_disabled_mcp_server_and_filter_separately(self, capsys):
+        config = {
+            "mcp_servers": {
+                "github": {"command": "npx", "enabled": False, "tools": {}},
+            },
+        }
+        with patch("hermes_cli.tools_config.load_config", return_value=config):
+            tools_disable_enable_command(Namespace(tools_action="list", platform="cli"))
+        out = capsys.readouterr().out
+        assert "github" in out
+        assert "server disabled" in out
+        assert "tool filter allows all" in out
+        assert "all tools enabled" not in out
+
     def test_list_shows_mcp_excluded_tools(self, capsys):
         config = {
             "mcp_servers": {"github": {"tools": {"exclude": ["create_issue"]}}},
