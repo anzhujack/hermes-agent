@@ -4786,8 +4786,10 @@ def resolve_provider_client(
                 # _wrap_if_needed reads the closed-over `api_mode` (the task-level
                 # override). Named-provider entry api_mode=codex_responses also
                 # flows through here.
-                if entry_api_mode == "codex_responses" and not isinstance(
-                    client, CodexAuxiliaryClient
+                if (
+                    entry_api_mode == "codex_responses"
+                    and not raw_codex
+                    and not isinstance(client, CodexAuxiliaryClient)
                 ):
                     client = CodexAuxiliaryClient(client, final_model)
                 else:

@@ -149,6 +149,31 @@ class TestResolveProviderClientNamedCustom:
         # Should use _read_main_model() fallback
         assert model == "main-model"
 
+    def test_named_codex_provider_raw_codex_returns_responses_client(self, tmp_path):
+        """The main fallback loop needs direct ``client.responses`` access."""
+        _write_config(tmp_path, {
+            "model": {"default": "gpt-5.6-sol"},
+            "custom_providers": [
+                {
+                    "name": "responses-relay",
+                    "base_url": "https://responses-relay.test/v1",
+                    "api_key": "k",
+                    "api_mode": "codex_responses",
+                    "model": "gpt-5.6-sol",
+                },
+            ],
+        })
+        from agent.auxiliary_client import resolve_provider_client
+        from openai import OpenAI
+
+        client, model = resolve_provider_client(
+            "responses-relay", model="gpt-5.6-sol", raw_codex=True,
+        )
+
+        assert isinstance(client, OpenAI)
+        assert hasattr(client, "responses")
+        assert model == "gpt-5.6-sol"
+
     def test_named_custom_no_api_key_uses_fallback(self, tmp_path):
         _write_config(tmp_path, {
             "model": {"default": "test"},
