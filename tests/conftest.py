@@ -22,9 +22,24 @@ test runner at ``scripts/run_tests.sh``.
 import asyncio
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# Quarantine HERMES_HOME at conftest import time, before pytest imports test
+# modules during collection.  Autouse fixtures run only after collection, so
+# they are too late for modules that freeze paths such as cron.jobs.JOBS_FILE
+# at import time.  The canonical parallel runner independently sets a per-file
+# HERMES_HOME before pytest/plugin startup; this guard covers direct
+# ``python -m pytest ...`` invocations as well.
+_COLLECTION_HOME = tempfile.TemporaryDirectory(
+    prefix="hermes-pytest-collection-"
+)
+_COLLECTION_HERMES_HOME = Path(_COLLECTION_HOME.name)
+for _subdir in ("sessions", "cron", "memories", "skills"):
+    (_COLLECTION_HERMES_HOME / _subdir).mkdir()
+os.environ["HERMES_HOME"] = str(_COLLECTION_HERMES_HOME)
 
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent

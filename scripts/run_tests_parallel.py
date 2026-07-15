@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -251,7 +252,20 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+
+    # Quarantine HERMES_HOME before pytest starts.  Test modules and pytest
+    # plugins are imported during collection, before autouse fixtures can
+    # redirect the environment; inheriting a developer's live home here lets
+    # module-level constants such as cron.jobs.JOBS_FILE bind to real state.
+    # A separate home per file preserves the runner's process-isolation
+    # contract and prevents cross-file registry/config leakage.
+    test_home = tempfile.TemporaryDirectory(prefix="hermes-test-home-")
+    child_env = {
+        **os.environ,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "HERMES_HOME": test_home.name,
+    }
+
     subproc_start = time.monotonic()
     # launch the pytest process
     proc = subprocess.Popen(
@@ -261,7 +275,7 @@ def _run_one_file(
         stderr=subprocess.STDOUT,
         text=True,
         # skipping writing bytecode because we're running a bunch of parallel python processes on the same code
-        env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
+        env=child_env,
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
         # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
@@ -298,6 +312,7 @@ def _run_one_file(
         # KeyboardInterrupt / runner crash — make sure no zombie
         # grandchildren outlive us.
         _kill_tree(proc, pgid=pgid)
+        test_home.cleanup()
         raise
     else:
         # Happy path: pytest exited on its own. Kill the group anyway in
@@ -305,6 +320,8 @@ def _run_one_file(
         _kill_tree(proc, pgid=pgid)
 
         output +=  "\n"
+
+    test_home.cleanup()
 
     if rc == 5:
         # No tests collected — every test in the file was filtered out.
