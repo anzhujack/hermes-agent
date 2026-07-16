@@ -91,6 +91,50 @@ _DEFAULT_FILE_TIMEOUT_SECONDS = 300.0
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
 
+# A gateway-launched test run inherits the live session's configuration in its
+# process environment.  Pytest's autouse fixtures are too late to contain that
+# state: plugins and test modules have already imported by then, and several
+# modules intentionally bind routing/config values at import time.  Keep only
+# explicit test-control variables and scrub runtime/session/platform state
+# before the pytest interpreter starts.
+_TEST_PLATFORM_ENV_PREFIXES = (
+    "TELEGRAM_", "DISCORD_", "SLACK_", "WHATSAPP_", "SIGNAL_",
+    "MATRIX_", "MATTERMOST_", "EMAIL_", "SMS_", "DINGTALK_",
+    "FEISHU_", "WECOM_", "WEIXIN_", "QQ_", "QQBOT_",
+    "BLUEBUBBLES_",
+)
+_TEST_CREDENTIAL_SUFFIXES = (
+    "_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIALS",
+    "_ACCESS_KEY", "_SECRET_ACCESS_KEY", "_PRIVATE_KEY",
+    "_OAUTH_TOKEN", "_WEBHOOK_SECRET", "_ENCRYPT_KEY", "_APP_SECRET",
+    "_CLIENT_SECRET", "_CORP_SECRET", "_AES_KEY",
+)
+
+
+def _build_test_child_env(test_home: str) -> dict[str, str]:
+    """Return an environment safe for pytest collection and execution."""
+    child_env = dict(os.environ)
+    for name in list(child_env):
+        is_hermes_runtime = (
+            name.startswith("HERMES_")
+            and not name.startswith("HERMES_TEST_")
+        )
+        if (
+            is_hermes_runtime
+            or name == "_HERMES_GATEWAY"
+            or name.startswith(_TEST_PLATFORM_ENV_PREFIXES)
+            or any(name.endswith(suffix) for suffix in _TEST_CREDENTIAL_SUFFIXES)
+            or name in {"TERMINAL_CWD", "TERMINAL_ENV", "BROWSER_CDP_URL", "CAMOFOX_URL"}
+        ):
+            child_env.pop(name, None)
+    child_env.update(
+        {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "HERMES_HOME": test_home,
+        }
+    )
+    return child_env
+
 
 def _approximately_count_tests(
     files: List[Path], repo_root: Path
@@ -260,11 +304,7 @@ def _run_one_file(
     # A separate home per file preserves the runner's process-isolation
     # contract and prevents cross-file registry/config leakage.
     test_home = tempfile.TemporaryDirectory(prefix="hermes-test-home-")
-    child_env = {
-        **os.environ,
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "HERMES_HOME": test_home.name,
-    }
+    child_env = _build_test_child_env(test_home.name)
 
     subproc_start = time.monotonic()
     # launch the pytest process
@@ -274,7 +314,6 @@ def _run_one_file(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        # skipping writing bytecode because we're running a bunch of parallel python processes on the same code
         env=child_env,
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.

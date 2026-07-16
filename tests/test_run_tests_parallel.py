@@ -390,3 +390,65 @@ def test_direct_pytest_quarantines_home_before_collection(tmp_path: Path) -> Non
         "tests/conftest.py isolated HERMES_HOME only after collection; "
         f"child pytest output:\n{proc.stdout}"
     )
+
+
+def _seed_live_gateway_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_REAL_HOME": "/sensitive-real-home",
+            "HERMES_SESSION_PLATFORM": "discord",
+            "HERMES_SESSION_PROFILE": "live-profile",
+            "DISCORD_ALLOWED_CHANNELS": "live-channel",
+            "WEIXIN_HOME_CHANNEL": "live-home",
+            "OPENAI_API_KEY": "must-not-reach-pytest",
+            # Explicit test controls are intentionally preserved.
+            "HERMES_TEST_IMAGE": "prebuilt:test",
+        }
+    )
+    return env
+
+
+def test_runner_scrubs_gateway_context_before_collection() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe = repo_root / "tests" / "_probes" / "env_collection_probe.py"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe),
+            "-j",
+            "1",
+            "--file-timeout",
+            "30",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=_seed_live_gateway_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+
+
+def test_direct_pytest_scrubs_gateway_context_before_collection() -> None:
+    repo_root = Path(__file__).resolve().parent.parent
+    probe = repo_root / "tests" / "_probes" / "env_collection_probe.py"
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(probe), "-q"],
+        cwd=repo_root,
+        env=_seed_live_gateway_env(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout

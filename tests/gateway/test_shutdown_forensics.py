@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import sys
 import time
@@ -201,6 +202,35 @@ class TestSpawnAsyncDiagnostic:
         # Spawning bash in detached mode takes a few ms; anything under 1s
         # is plenty of headroom and proves we're not waiting on it.
         assert elapsed < 1.0, f"spawn blocked for {elapsed:.2f}s"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only diagnostic")
+    def test_timeout_kills_blocking_descendant(self, tmp_path, monkeypatch):
+        """A timed-out shell must not leave descendants holding the log fd."""
+        marker_path = tmp_path / "descendant-survived"
+        script = (
+            f"(sleep 2; printf survived > {shlex.quote(str(marker_path))}) & wait"
+        )
+        monkeypatch.setattr(sf, "_build_diagnostic_script", lambda _signal: script)
+
+        pid = sf.spawn_async_diagnostic(
+            tmp_path / "diag.log", "SIGTERM", timeout_seconds=0.1
+        )
+        assert pid is not None
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                reaped_pid, _status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                reaped_pid = pid
+            if reaped_pid == pid:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("diagnostic watchdog did not exit after timeout")
+
+        time.sleep(2.2)
+        assert not marker_path.exists(), "blocking descendant survived timeout"
 
 
 # ---------------------------------------------------------------------------

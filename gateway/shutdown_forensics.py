@@ -194,6 +194,23 @@ def snapshot_shutdown_context(received_signal: Any = None) -> Dict[str, Any]:
     return ctx
 
 
+def _build_diagnostic_script(signal_name: str) -> str:
+    """Return the bounded shell payload used by the detached watchdog."""
+    return (
+        f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
+        "echo '--- date ---'; date -u +%Y-%m-%dT%H:%M:%SZ; "
+        "echo '--- ps auxf (top 60 by cpu) ---'; "
+        "ps auxf --sort=-pcpu 2>/dev/null | head -60; "
+        "echo '--- pstree of self ---'; "
+        f"pstree -plau {os.getpid()} 2>/dev/null | head -40 || true; "
+        "echo '--- /proc/loadavg ---'; "
+        "cat /proc/loadavg 2>/dev/null || true; "
+        "echo '--- recent dmesg (oom/killed) ---'; "
+        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
+        "echo '=== end ==='"
+    )
+
+
 def spawn_async_diagnostic(
     log_path: Path,
     signal_name: str,
@@ -225,26 +242,23 @@ def spawn_async_diagnostic(
     if sys.platform == "win32":
         return None
 
-    script = (
-        f"echo '=== shutdown diagnostic @ {signal_name} ==='; "
-        "echo '--- date ---'; date -u +%Y-%m-%dT%H:%M:%SZ; "
-        "echo '--- ps auxf (top 60 by cpu) ---'; "
-        "ps auxf --sort=-pcpu 2>/dev/null | head -60; "
-        "echo '--- pstree of self ---'; "
-        f"pstree -plau {os.getpid()} 2>/dev/null | head -40 || true; "
-        "echo '--- /proc/loadavg ---'; "
-        "cat /proc/loadavg 2>/dev/null || true; "
-        "echo '--- recent dmesg (oom/killed) ---'; "
-        "dmesg -T 2>/dev/null | tail -20 || journalctl --user -n 20 --no-pager 2>/dev/null | tail -20 || true; "
-        "echo '=== end ==='"
-    )
+    script = _build_diagnostic_script(signal_name)
     watchdog = (
+        "import os\n"
+        "import signal\n"
         "import subprocess\n"
+        f"proc = subprocess.Popen(['sh', '-c', {script!r}], start_new_session=True)\n"
         "try:\n"
-        f"    subprocess.run(['sh', '-c', {script!r}], "
-        f"timeout={timeout_seconds!r}, check=False)\n"
+        f"    proc.wait(timeout={timeout_seconds!r})\n"
         "except subprocess.TimeoutExpired:\n"
-        "    pass\n"
+        "    try:\n"
+        "        os.killpg(proc.pid, signal.SIGKILL)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    try:\n"
+        "        proc.wait(timeout=1.0)\n"
+        "    except subprocess.TimeoutExpired:\n"
+        "        pass\n"
     )
 
     try:

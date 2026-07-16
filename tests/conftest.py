@@ -27,20 +27,6 @@ from pathlib import Path
 
 import pytest
 
-# Quarantine HERMES_HOME at conftest import time, before pytest imports test
-# modules during collection.  Autouse fixtures run only after collection, so
-# they are too late for modules that freeze paths such as cron.jobs.JOBS_FILE
-# at import time.  The canonical parallel runner independently sets a per-file
-# HERMES_HOME before pytest/plugin startup; this guard covers direct
-# ``python -m pytest ...`` invocations as well.
-_COLLECTION_HOME = tempfile.TemporaryDirectory(
-    prefix="hermes-pytest-collection-"
-)
-_COLLECTION_HERMES_HOME = Path(_COLLECTION_HOME.name)
-for _subdir in ("sessions", "cron", "memories", "skills"):
-    (_COLLECTION_HERMES_HOME / _subdir).mkdir()
-os.environ["HERMES_HOME"] = str(_COLLECTION_HERMES_HOME)
-
 # Ensure project root is importable
 PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -181,6 +167,14 @@ def _looks_like_credential(name: str) -> bool:
     return any(name.endswith(suf) for suf in _CREDENTIAL_SUFFIXES)
 
 
+_PLATFORM_ENV_PREFIXES = (
+    "TELEGRAM_", "DISCORD_", "SLACK_", "WHATSAPP_", "SIGNAL_",
+    "MATRIX_", "MATTERMOST_", "EMAIL_", "SMS_", "DINGTALK_",
+    "FEISHU_", "WECOM_", "WEIXIN_", "QQ_", "QQBOT_",
+    "BLUEBUBBLES_",
+)
+
+
 # HERMES_* vars that change test behavior by being set. Unset all of these
 # unconditionally — individual tests that need them set do so explicitly.
 _HERMES_BEHAVIORAL_VARS = frozenset({
@@ -214,6 +208,11 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_BACKGROUND_NOTIFICATIONS",
     "HERMES_EXEC_ASK",
     "HERMES_HOME_MODE",
+    "HERMES_REAL_HOME",
+    "HERMES_PROFILE",
+    "HERMES_CONFIG",
+    "HERMES_ENV",
+    "HERMES_UI_SESSION_ID",
     "HERMES_AGENT_USE_LEGACY_SESSION_KEYS",
     # Kanban path/board pins must never leak from a developer shell or
     # dispatched worker into tests; otherwise tests can write fake tasks to
@@ -340,6 +339,33 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
 })
 
 
+# Quarantine runtime state at conftest import time, before pytest imports test
+# modules during collection.  Autouse fixtures run only after collection, so
+# they are too late for modules that freeze paths, routing, or authorization
+# from the environment at import time.  Keep explicit HERMES_TEST_* controls,
+# but remove every live Hermes/platform variable and credential-shaped value.
+for _name in list(os.environ):
+    _is_live_hermes = (
+        _name.startswith("HERMES_")
+        and not _name.startswith("HERMES_TEST_")
+    )
+    if (
+        _is_live_hermes
+        or _name == "_HERMES_GATEWAY"
+        or _name.startswith(_PLATFORM_ENV_PREFIXES)
+        or _looks_like_credential(_name)
+    ):
+        os.environ.pop(_name, None)
+
+_COLLECTION_HOME = tempfile.TemporaryDirectory(
+    prefix="hermes-pytest-collection-"
+)
+_COLLECTION_HERMES_HOME = Path(_COLLECTION_HOME.name)
+for _subdir in ("sessions", "cron", "memories", "skills"):
+    (_COLLECTION_HERMES_HOME / _subdir).mkdir()
+os.environ["HERMES_HOME"] = str(_COLLECTION_HERMES_HOME)
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_environment(tmp_path, monkeypatch):
     """Blank out all credential/behavioral env vars so local and CI match.
@@ -350,7 +376,11 @@ def _hermetic_environment(tmp_path, monkeypatch):
     """
     # 1. Blank every credential-shaped env var that's currently set.
     for name in list(os.environ.keys()):
-        if _looks_like_credential(name):
+        if (
+            _looks_like_credential(name)
+            or name.startswith(_PLATFORM_ENV_PREFIXES)
+            or name.startswith("HERMES_SESSION_")
+        ):
             monkeypatch.delenv(name, raising=False)
 
     # 2. Blank behavioral HERMES_* vars that could change test semantics.
@@ -631,6 +661,13 @@ def _live_system_guard(request, monkeypatch):
     real_kill = _os.kill
 
     def _guarded_kill(pid, sig, *args, **kwargs):
+        # Signal 0 is a pure liveness probe — it cannot terminate anything.
+        # psutil.pid_exists() uses os.kill(pid, 0) on POSIX, and probing a
+        # just-killed grandchild that was reparented to init (zombie with a
+        # foreign parent chain) must not trip the guard. Flaked in CI on
+        # test_entire_tree_is_sigkilled_not_just_parent.
+        if int(sig) == 0:
+            return real_kill(pid, sig, *args, **kwargs)
         if _is_own_subtree(int(pid)):
             return real_kill(pid, sig, *args, **kwargs)
         raise RuntimeError(
@@ -656,6 +693,9 @@ def _live_system_guard(request, monkeypatch):
         own_pgid = _os.getpgrp()
 
         def _guarded_killpg(pgid, sig, *args, **kwargs):
+            # Signal 0 is a pure liveness probe — never destructive.
+            if int(sig) == 0:
+                return real_killpg(pgid, sig, *args, **kwargs)
             if int(pgid) == own_pgid or _is_own_subtree(int(pgid)):
                 return real_killpg(pgid, sig, *args, **kwargs)
             raise RuntimeError(
