@@ -103,7 +103,7 @@ OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_hermes_home, normalize_extra_headers
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, env_float, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
@@ -4926,6 +4926,17 @@ def resolve_provider_client(
                 _clean_base2, _dq2 = _extract_url_query_params(openai_base)
                 _extra2 = {"default_query": _dq2} if _dq2 else {}
                 _headers2 = _apply_user_default_headers(_extra2.get("default_headers"))
+                # Named custom-provider headers are the most specific config
+                # level, matching the primary-agent client construction path.
+                # This is load-bearing for fallbacks/auxiliary calls to relays
+                # whose WAF requires a scoped User-Agent sentinel. SECURITY:
+                # values may carry credentials — never log them.
+                _provider_headers2 = normalize_extra_headers(
+                    custom_entry.get("extra_headers")
+                )
+                if _provider_headers2:
+                    _headers2 = dict(_headers2 or {})
+                    _headers2.update(_provider_headers2)
                 if _headers2:
                     _extra2["default_headers"] = _headers2
                 logger.debug(

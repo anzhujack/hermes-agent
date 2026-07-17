@@ -174,6 +174,42 @@ class TestResolveProviderClientNamedCustom:
         assert hasattr(client, "responses")
         assert model == "gpt-5.6-sol"
 
+    def test_named_custom_provider_merges_provider_extra_headers(self, tmp_path):
+        """Provider-specific headers must survive the auxiliary/fallback resolver."""
+        _write_config(tmp_path, {
+            "model": {
+                "default": "gpt-5.6-sol",
+                "default_headers": {
+                    "User-Agent": "global-agent/1.0",
+                    "X-Global": "global",
+                },
+            },
+            "custom_providers": [
+                {
+                    "name": "headers-relay",
+                    "base_url": "https://headers-relay.test/v1",
+                    "api_key": "k",
+                    "api_mode": "codex_responses",
+                    "model": "gpt-5.6-sol",
+                    "extra_headers": {
+                        "User-Agent": "relay-agent/1.0",
+                        "X-Provider": "provider",
+                    },
+                },
+            ],
+        })
+        from agent.auxiliary_client import resolve_provider_client
+
+        client, model = resolve_provider_client(
+            "headers-relay", model="gpt-5.6-sol", raw_codex=True,
+        )
+
+        headers = dict(getattr(client, "_custom_headers", None) or {})
+        assert headers.get("X-Global") == "global"
+        assert headers.get("X-Provider") == "provider"
+        assert headers.get("User-Agent") == "relay-agent/1.0"
+        assert model == "gpt-5.6-sol"
+
     def test_named_custom_no_api_key_uses_fallback(self, tmp_path):
         _write_config(tmp_path, {
             "model": {"default": "test"},
