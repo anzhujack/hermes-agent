@@ -75,14 +75,16 @@ def test_emit_wait_notice_swallows_callback_errors(tmp_path, monkeypatch):
     assert "waiting" in agent.get_activity_summary()["last_activity_desc"]
 
 
-def test_nonstream_wait_notice_handles_disabled_stale_timeout(tmp_path, monkeypatch):
-    """A local endpoint's infinite stale deadline must stay display-safe.
+def test_nonstream_wait_notice_handles_infinite_stale_with_idle_watchdog(
+    tmp_path, monkeypatch
+):
+    """A local endpoint's infinite generic deadline must stay display-safe.
 
     Codex Responses can emit an opening SSE event and then spend longer than
     30 seconds generating the full response.  Local endpoints intentionally
     disable the generic stale detector with ``float("inf")``; the periodic
-    wait notice must not convert that sentinel to ``int`` and abort the live
-    request.
+    wait notice must not convert that sentinel to ``int``.  The newer finite
+    event-idle watchdog remains active and should be advertised instead.
     """
     from agent import chat_completion_helpers as h
 
@@ -136,7 +138,7 @@ def test_nonstream_wait_notice_handles_disabled_stale_timeout(tmp_path, monkeypa
     assert clock.polls == 100
     assert any(
         "30s with no response yet" in notice
-        and "auto-reconnect disabled" in notice
+        and "auto-reconnect at " in notice
         for notice in seen
     )
 
