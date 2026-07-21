@@ -106,16 +106,18 @@ def test_unified_plugin_registers_all_tools_and_hooks():
         "pre_llm_call",
         "subagent_start",
         "subagent_stop",
+        "on_session_end",
     ]
     assert plugin.__file__ is not None
     metadata = yaml.safe_load((Path(plugin.__file__).with_name("plugin.yaml")).read_text(encoding="utf-8"))
-    assert metadata["version"] == "0.6.0"
+    assert metadata["version"] == "0.7.0"
     assert metadata["hooks"] == [
         "pre_tool_call",
         "transform_tool_result",
         "pre_llm_call",
         "subagent_start",
         "subagent_stop",
+        "on_session_end",
     ]
 
 
@@ -545,7 +547,7 @@ def test_task_route_selects_experts_and_records_audit_file(_isolated_lchd_home):
     assert route["experts"][0] == "coordinator"
     assert "builder" in route["experts"]
     assert "scripts/run_tests.sh tests/plugins/test_lchd_personal_assistant_plugin.py" in route["verification"]
-    assert route["version"] == "0.6.0"
+    assert route["version"] == "0.7.0"
     assert route["risk_level"] == "medium"
     assert route["requires_confirmation"] is False
     assert route["human_gate"]["required"] is False
@@ -674,7 +676,7 @@ def test_task_route_builds_parallel_research_delegation_plan(_isolated_lchd_home
     route = json.loads(plugin.handle_task_route({"task": "联网搜索 Hermes delegate_task 和多智能体 human-in-the-loop 方案，给我 v0.4 方案"}))
 
     assert route["ok"] is True
-    assert route["version"] == "0.6.0"
+    assert route["version"] == "0.7.0"
     assert route["task_type"] == "research"
     assert route["delegation"]["recommended"] is True
     assert route["delegation"]["mode"] == "parallel_research"
@@ -723,7 +725,7 @@ def test_task_finalize_recommends_persistence_targets(_isolated_lchd_home):
     }))
 
     assert decision["ok"] is True
-    assert decision["version"] == "0.6.0"
+    assert decision["version"] == "0.7.0"
     assert decision["recommendations"]["write_handoff"] is True
     assert decision["recommendations"]["update_wiki"] is True
     assert decision["recommendations"]["suggest_skill"] is True

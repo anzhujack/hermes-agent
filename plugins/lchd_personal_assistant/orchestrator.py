@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover
         return {}
 
 _ROLE_ORDER = ("coordinator", "researcher", "writer", "builder")
-_PLUGIN_VERSION = "0.6.0"
+_PLUGIN_VERSION = "0.7.0"
 _SOUL_CONTEXT_MAX_CHARS = 1600
 _ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "coordinator": {

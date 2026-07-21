@@ -11,6 +11,7 @@ All tools are exposed through one toolset, ``lchd_personal``.
 
 from __future__ import annotations
 
+from .artifact_cleanup import on_session_end as on_artifact_cleanup_session_end
 from .context import (
     LCHD_CONTEXT_PROFILE_SCHEMA,
     LCHD_RUNTIME_SNAPSHOT_SCHEMA,
@@ -47,6 +48,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("subagent_start", on_subagent_start)
     ctx.register_hook("subagent_stop", on_subagent_stop)
+    ctx.register_hook("on_session_end", on_artifact_cleanup_session_end)
     ctx.register_tool(
         name="lchd_context_profile",
         toolset=_TOOLSET,
