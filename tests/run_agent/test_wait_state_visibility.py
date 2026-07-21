@@ -75,6 +75,72 @@ def test_emit_wait_notice_swallows_callback_errors(tmp_path, monkeypatch):
     assert "waiting" in agent.get_activity_summary()["last_activity_desc"]
 
 
+def test_nonstream_wait_notice_handles_disabled_stale_timeout(tmp_path, monkeypatch):
+    """A local endpoint's infinite stale deadline must stay display-safe.
+
+    Codex Responses can emit an opening SSE event and then spend longer than
+    30 seconds generating the full response.  Local endpoints intentionally
+    disable the generic stale detector with ``float("inf")``; the periodic
+    wait notice must not convert that sentinel to ``int`` and abort the live
+    request.
+    """
+    from agent import chat_completion_helpers as h
+
+    seen: list[str] = []
+    agent = _make_agent(tmp_path, monkeypatch, thinking_callback=seen.append)
+    setattr(agent, "api_mode", "codex_responses")
+    monkeypatch.setattr(
+        agent,
+        "_compute_non_stream_stale_timeout",
+        lambda *a, **k: float("inf"),
+    )
+
+    class _FakeClock:
+        def __init__(self):
+            self.polls = 0
+
+        def time(self):
+            # Derive time from the poll count instead of repeatedly adding 0.3,
+            # which keeps the 100th poll exactly at the 30-second boundary.
+            return 1_000.0 + (self.polls * 0.3)
+
+        def advance_poll(self):
+            self.polls += 1
+
+    clock = _FakeClock()
+    monkeypatch.setattr(h, "time", SimpleNamespace(time=clock.time))
+
+    class _OpeningEventThenSlowThread:
+        def __init__(self, *args, **kwargs):
+            self._alive_checks = 0
+
+        def start(self):
+            # Simulate the opening SSE frame that disables the TTFB deadline.
+            setattr(agent, "_codex_stream_last_event_ts", clock.time())
+
+        def is_alive(self):
+            self._alive_checks += 1
+            return self._alive_checks <= 100
+
+        def join(self, timeout=None):
+            clock.advance_poll()
+            # Keep the stream active so the event-idle watchdog does not fire.
+            setattr(agent, "_codex_stream_last_event_ts", clock.time())
+
+    monkeypatch.setattr(h.threading, "Thread", _OpeningEventThenSlowThread)
+
+    assert h.interruptible_api_call(
+        agent,
+        {"model": "gpt-5.6-sol", "input": "slow response"},
+    ) is None
+    assert clock.polls == 100
+    assert any(
+        "30s with no response yet" in notice
+        and "auto-reconnect disabled" in notice
+        for notice in seen
+    )
+
+
 def test_nonstream_wait_loop_emits_explained_notice(tmp_path, monkeypatch):
     """After ~30s with no response, interruptible_api_call rewrites the live
     line with an explanation (model name, elapsed, overload hint, recovery

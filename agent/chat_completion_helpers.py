@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -617,10 +618,15 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 and getattr(agent, "_codex_stream_last_event_ts", None) is None
             ):
                 _deadline = min(_deadline, _ttfb_timeout)
+            _reconnect_hint = (
+                f"auto-reconnect at {int(_deadline)}s"
+                if math.isfinite(_deadline)
+                else "auto-reconnect disabled"
+            )
             agent._emit_wait_notice(
                 f"⏳ waiting on {api_kwargs.get('model', 'the provider')} — "
                 f"{int(_elapsed)}s with no response yet (provider may be slow "
-                f"or overloaded; auto-reconnect at {int(_deadline)}s)"
+                f"or overloaded; {_reconnect_hint})"
             )
 
         _elapsed = time.time() - _call_start
